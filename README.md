@@ -18,9 +18,11 @@ macron
 macron -e
 ```
 
-Running `macron` with no subcommand prints the local crontab-format file.
+Running `macron` with no subcommand scans the default user and local launchd
+plist directories, refreshes the local crontab-format file, and prints it.
 Running `macron -e` edits that same file and then exports plist files to
-`~/Library/LaunchAgents`.
+`~/Library/LaunchAgents`. If the file does not exist yet, `macron -e` seeds it
+from the detected launchd schedules before opening the editor.
 
 To build a native macOS release binary on macOS:
 
@@ -50,8 +52,10 @@ When importing without paths, `macron` scans:
 /Library/LaunchDaemons
 ```
 
-Imported jobs are stored as normal five-field crontab lines with nearby metadata
-comments preserving the launchd label and source file.
+Detected and imported jobs are stored as normal five-field crontab lines with
+nearby metadata comments preserving the launchd label and source file. Running
+`macron import` refreshes the local file from the selected plist paths instead of
+appending duplicate entries.
 
 ## Supported Schedules
 

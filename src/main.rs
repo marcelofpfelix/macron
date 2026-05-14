@@ -6,7 +6,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -112,13 +112,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = cli.file.unwrap_or_else(default_store_path);
 
     if cli.edit {
+        seed_store_if_needed(&store)?;
         edit_store(&store)?;
         export_store(&store, None)?;
         return Ok(());
     }
 
     match cli.command.unwrap_or(Commands::List) {
-        Commands::List => print_store(&store)?,
+        Commands::List => {
+            refresh_store_from_paths(&store, default_import_paths(), io::sink())?;
+            print_store(&store)?;
+        }
         Commands::Import { paths } => import_plists(&store, paths)?,
         Commands::Export { output } => export_store(&store, output)?,
         Commands::File => println!("{}", store.display()),
@@ -181,6 +185,20 @@ fn print_store(store: &Path) -> io::Result<()> {
     }
 }
 
+fn seed_store_if_needed(store: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let needs_seed = match fs::read_to_string(store) {
+        Ok(contents) => contents.trim().is_empty(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+
+    if needs_seed {
+        refresh_store_from_paths(store, default_import_paths(), io::sink())?;
+    }
+
+    Ok(())
+}
+
 fn import_plists(store: &Path, paths: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let paths = if paths.is_empty() {
         default_import_paths()
@@ -188,20 +206,38 @@ fn import_plists(store: &Path, paths: Vec<PathBuf>) -> Result<(), Box<dyn std::e
         paths
     };
 
+    let imported = refresh_store_from_paths(store, paths, io::stderr())?;
+    println!("imported {} job(s) into {}", imported, store.display());
+    Ok(())
+}
+
+fn refresh_store_from_paths<W: Write>(
+    store: &Path,
+    paths: Vec<PathBuf>,
+    mut warnings: W,
+) -> Result<usize, Box<dyn std::error::Error>> {
     let mut imported = Vec::new();
     for plist_path in plist_files(paths)? {
         match plist_to_entries(&plist_path) {
             Ok(mut entries) => imported.append(&mut entries),
-            Err(error) => eprintln!("macron: skipped {}: {error}", plist_path.display()),
+            Err(error) => writeln!(
+                warnings,
+                "macron: skipped {}: {error}",
+                plist_path.display()
+            )?,
         }
     }
 
     ensure_parent(store)?;
-    let mut contents = fs::read_to_string(store).unwrap_or_default();
-    if !contents.is_empty() && !contents.ends_with('\n') {
-        contents.push('\n');
-    }
-    for entry in &imported {
+    let contents = format_entries_file(&imported);
+    fs::write(store, contents)?;
+    Ok(imported.len())
+}
+
+fn format_entries_file(entries: &[CronEntry]) -> String {
+    let mut contents =
+        "# macron crontab\n# minute hour day-of-month month day-of-week command\n".to_string();
+    for entry in entries {
         if let Some(source) = &entry.source {
             contents.push_str(&format!("# macron:source={}\n", source.display()));
         }
@@ -210,13 +246,7 @@ fn import_plists(store: &Path, paths: Vec<PathBuf>) -> Result<(), Box<dyn std::e
         }
         contents.push_str(&format!("{}\n", format_entry(entry)));
     }
-    fs::write(store, contents)?;
-    println!(
-        "imported {} job(s) into {}",
-        imported.len(),
-        store.display()
-    );
-    Ok(())
+    contents
 }
 
 fn export_store(store: &Path, output: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
@@ -588,6 +618,31 @@ mod tests {
         assert_eq!(entries[0].label.as_deref(), Some("com.example.job"));
         assert_eq!(entries[0].schedule.minute, "15");
         assert_eq!(entries[0].command, "/usr/bin/true");
+    }
+
+    #[test]
+    fn formats_entries_file_with_header_and_metadata() {
+        let entry = CronEntry {
+            schedule: CronSchedule {
+                minute: "0".to_string(),
+                hour: "9".to_string(),
+                day_of_month: "*".to_string(),
+                month: "*".to_string(),
+                day_of_week: "*".to_string(),
+            },
+            command: "/usr/bin/true".to_string(),
+            label: Some("com.example.job".to_string()),
+            source: Some(PathBuf::from("/tmp/com.example.job.plist")),
+        };
+
+        assert_eq!(
+            format_entries_file(&[entry]),
+            "# macron crontab\n\
+             # minute hour day-of-month month day-of-week command\n\
+             # macron:source=/tmp/com.example.job.plist\n\
+             # macron:label=com.example.job\n\
+             0 9 * * * /usr/bin/true\n"
+        );
     }
 
     #[test]
