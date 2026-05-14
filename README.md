@@ -80,6 +80,57 @@ nearby metadata comments preserving the launchd label and source file. Running
 `macron import` refreshes the local file from the selected plist paths instead of
 appending duplicate entries.
 
+## Templates
+
+Imported jobs save their original plist as a per-label template under:
+
+```text
+~/.macron/templates/
+```
+
+On export, `macron` loads the template and updates only the managed fields:
+
+```text
+Label
+ProgramArguments
+StartCalendarInterval
+StartInterval
+```
+
+That preserves fields such as `EnvironmentVariables`, `StandardOutPath`,
+`StandardErrorPath`, `RunAtLoad`, and `KeepAlive`.
+
+For jobs created from scratch in `macron -e`, add one of the generic built-in
+templates before the cron line:
+
+```cron
+# macron:label=com.example.backup
+# macron:template=basic
+0 2 * * * /Users/me/bin/backup
+
+# macron:label=com.example.logged
+# macron:template=logged
+*/15 * * * * /Users/me/bin/sync
+
+# macron:label=com.example.env
+# macron:template=environment
+0 * * * * /Users/me/bin/job
+```
+
+Built-in templates:
+
+- `basic`: minimal launchd plist.
+- `logged`: adds `RunAtLoad=false`, stdout log, and stderr log paths.
+- `environment`: adds `RunAtLoad=false` and a Homebrew-friendly `PATH`.
+
+Custom templates are also supported:
+
+```cron
+# macron:label=com.example.custom
+# macron:template=/Users/me/templates/custom.plist
+0 3 * * * /Users/me/bin/custom-job
+```
+
 ## Supported Schedules
 
 `macron` reads and writes `StartCalendarInterval` launchd jobs. It supports:

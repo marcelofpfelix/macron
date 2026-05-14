@@ -73,6 +73,7 @@ struct CronEntry {
     command: String,
     label: Option<String>,
     source: Option<PathBuf>,
+    template: Option<String>,
     interval_seconds: Option<u64>,
 }
 
@@ -160,6 +161,30 @@ fn default_store_path() -> PathBuf {
 
 fn default_export_dir() -> PathBuf {
     home_dir().join("Library").join("LaunchAgents")
+}
+
+fn template_dir_for_store(store: &Path) -> PathBuf {
+    store
+        .parent()
+        .map(|parent| parent.join("templates"))
+        .unwrap_or_else(|| home_dir().join(".macron").join("templates"))
+}
+
+fn stored_template_path(store: &Path, label: &str) -> PathBuf {
+    template_dir_for_store(store).join(format!("{}.plist", safe_template_name(label)))
+}
+
+fn safe_template_name(label: &str) -> String {
+    label
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn home_dir() -> PathBuf {
@@ -386,7 +411,7 @@ fn refresh_store_from_paths<W: Write>(
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mut imported = Vec::new();
     for plist_path in plist_files(paths)? {
-        match plist_to_entries(&plist_path) {
+        match plist_to_entries(&plist_path, store) {
             Ok(mut entries) => imported.append(&mut entries),
             Err(error) => writeln!(
                 warnings,
@@ -403,14 +428,19 @@ fn refresh_store_from_paths<W: Write>(
 }
 
 fn format_entries_file(entries: &[CronEntry]) -> String {
-    let mut contents =
-        "# macron crontab\n# minute hour day-of-month month day-of-week command\n".to_string();
+    let mut contents = "# macron crontab\n\
+        # minute hour day-of-month month day-of-week command\n\
+        # built-in templates: basic, logged, environment\n"
+        .to_string();
     for entry in entries {
         if let Some(source) = &entry.source {
             contents.push_str(&format!("# macron:source={}\n", source.display()));
         }
         if let Some(label) = &entry.label {
             contents.push_str(&format!("# macron:label={label}\n"));
+        }
+        if let Some(template) = &entry.template {
+            contents.push_str(&format!("# macron:template={template}\n"));
         }
         if let Some(interval_seconds) = entry.interval_seconds {
             contents.push_str(&format!("# macron:start-interval={interval_seconds}\n"));
@@ -428,10 +458,13 @@ fn export_store(store: &Path, output: Option<PathBuf>) -> Result<(), Box<dyn std
     let entries = parse_crontab(&contents)?;
     let mut exported = 0;
     for (index, entry) in entries.iter().enumerate() {
-        let job = entry_to_launchd_job(entry, index)?;
-        let file_name = format!("{}.plist", job.label);
+        let label = entry
+            .label
+            .clone()
+            .unwrap_or_else(|| generated_label(entry, index));
+        let file_name = format!("{label}.plist");
         let target = output.join(file_name);
-        let value = plist::to_value(&job)?;
+        let value = entry_to_launchd_value(entry, index, store)?;
         value.to_file_xml(&target)?;
         exported += 1;
     }
@@ -483,7 +516,10 @@ fn plist_files(paths: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn plist_to_entries(path: &Path) -> Result<Vec<CronEntry>, Box<dyn std::error::Error>> {
+fn plist_to_entries(
+    path: &Path,
+    store: &Path,
+) -> Result<Vec<CronEntry>, Box<dyn std::error::Error>> {
     let value = Value::from_file(path)?;
     let dict = value
         .as_dictionary()
@@ -501,6 +537,14 @@ fn plist_to_entries(path: &Path) -> Result<Vec<CronEntry>, Box<dyn std::error::E
     } else {
         return Err("missing StartCalendarInterval or StartInterval".into());
     };
+    let template = if let Some(label) = &label {
+        let template_path = stored_template_path(store, label);
+        ensure_parent(&template_path)?;
+        value.to_file_xml(&template_path)?;
+        Some(template_path.display().to_string())
+    } else {
+        None
+    };
 
     Ok(schedules
         .into_iter()
@@ -509,6 +553,7 @@ fn plist_to_entries(path: &Path) -> Result<Vec<CronEntry>, Box<dyn std::error::E
             command: command.clone(),
             label: label.clone(),
             source: Some(path.to_path_buf()),
+            template: template.clone(),
             interval_seconds,
         })
         .collect())
@@ -609,6 +654,7 @@ fn parse_crontab(contents: &str) -> Result<Vec<CronEntry>, Box<dyn std::error::E
     let mut entries = Vec::new();
     let mut pending_label = None;
     let mut pending_source = None;
+    let mut pending_template = None;
     let mut pending_interval_seconds = None;
 
     for (line_number, raw_line) in contents.lines().enumerate() {
@@ -621,6 +667,8 @@ fn parse_crontab(contents: &str) -> Result<Vec<CronEntry>, Box<dyn std::error::E
                 pending_label = Some(label.trim().to_string());
             } else if let Some(source) = metadata.strip_prefix("source=") {
                 pending_source = Some(PathBuf::from(source.trim()));
+            } else if let Some(template) = metadata.strip_prefix("template=") {
+                pending_template = Some(template.trim().to_string());
             } else if let Some(interval_seconds) = metadata.strip_prefix("start-interval=") {
                 pending_interval_seconds = Some(interval_seconds.trim().parse::<u64>()?);
             }
@@ -651,6 +699,7 @@ fn parse_crontab(contents: &str) -> Result<Vec<CronEntry>, Box<dyn std::error::E
             command: raw_line[command_start..].trim().to_string(),
             label: pending_label.take(),
             source: pending_source.take(),
+            template: pending_template.take(),
             interval_seconds: pending_interval_seconds.take(),
         };
         entries.push(entry);
@@ -713,6 +762,129 @@ fn entry_to_launchd_job(
         start_interval: entry.interval_seconds,
         working_directory: None,
     })
+}
+
+fn entry_to_launchd_value(
+    entry: &CronEntry,
+    index: usize,
+    store: &Path,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let label = entry
+        .label
+        .clone()
+        .unwrap_or_else(|| generated_label(entry, index));
+    let mut value = match template_value(entry, &label, store)? {
+        Some(value) => value,
+        None => plist::to_value(&entry_to_launchd_job(entry, index)?)?,
+    };
+
+    let dict = value
+        .as_dictionary_mut()
+        .ok_or("template root is not a dictionary")?;
+    dict.insert("Label".to_string(), Value::String(label));
+    dict.insert(
+        "ProgramArguments".to_string(),
+        Value::Array(vec![
+            Value::String("/bin/sh".to_string()),
+            Value::String("-lc".to_string()),
+            Value::String(entry.command.clone()),
+        ]),
+    );
+    dict.remove("Program");
+    dict.remove("StartCalendarInterval");
+    dict.remove("StartInterval");
+
+    if let Some(seconds) = entry.interval_seconds {
+        dict.insert("StartInterval".to_string(), Value::Integer(seconds.into()));
+    } else {
+        dict.insert(
+            "StartCalendarInterval".to_string(),
+            plist::to_value(&schedule_to_calendar_interval(&entry.schedule)?)?,
+        );
+    }
+
+    Ok(value)
+}
+
+fn template_value(
+    entry: &CronEntry,
+    label: &str,
+    store: &Path,
+) -> Result<Option<Value>, Box<dyn std::error::Error>> {
+    if let Some(template) = &entry.template {
+        return Ok(Some(resolve_template_value(template, label)?));
+    }
+
+    let stored = stored_template_path(store, label);
+    if stored.exists() {
+        return Ok(Some(Value::from_file(stored)?));
+    }
+
+    Ok(None)
+}
+
+fn resolve_template_value(
+    template: &str,
+    label: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    match template {
+        "basic" => Ok(builtin_template_basic()),
+        "logged" => Ok(builtin_template_logged(label)),
+        "environment" => Ok(builtin_template_environment()),
+        path => Ok(Value::from_file(expand_home(path))?),
+    }
+}
+
+fn builtin_template_basic() -> Value {
+    Value::Dictionary(Dictionary::new())
+}
+
+fn builtin_template_logged(label: &str) -> Value {
+    let mut dict = Dictionary::new();
+    let log_dir = home_dir().join(".macron").join("logs");
+    dict.insert("RunAtLoad".to_string(), Value::Boolean(false));
+    dict.insert(
+        "StandardOutPath".to_string(),
+        Value::String(
+            log_dir
+                .join(format!("{}.out.log", safe_template_name(label)))
+                .display()
+                .to_string(),
+        ),
+    );
+    dict.insert(
+        "StandardErrorPath".to_string(),
+        Value::String(
+            log_dir
+                .join(format!("{}.err.log", safe_template_name(label)))
+                .display()
+                .to_string(),
+        ),
+    );
+    Value::Dictionary(dict)
+}
+
+fn builtin_template_environment() -> Value {
+    let mut env = Dictionary::new();
+    env.insert(
+        "PATH".to_string(),
+        Value::String("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()),
+    );
+
+    let mut dict = Dictionary::new();
+    dict.insert("RunAtLoad".to_string(), Value::Boolean(false));
+    dict.insert("EnvironmentVariables".to_string(), Value::Dictionary(env));
+    Value::Dictionary(dict)
+}
+
+fn expand_home(path: &str) -> PathBuf {
+    if path == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home_dir().join(rest);
+    }
+    PathBuf::from(path)
 }
 
 fn generated_label(entry: &CronEntry, index: usize) -> String {
@@ -840,10 +1012,11 @@ mod tests {
 
     #[test]
     fn parses_crontab_with_metadata() {
-        let contents = "# macron:label=com.example.job\n# macron:start-interval=300\n15 3 * * 1 /usr/bin/true\n";
+        let contents = "# macron:label=com.example.job\n# macron:template=logged\n# macron:start-interval=300\n15 3 * * 1 /usr/bin/true\n";
         let entries = parse_crontab(contents).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].label.as_deref(), Some("com.example.job"));
+        assert_eq!(entries[0].template.as_deref(), Some("logged"));
         assert_eq!(entries[0].interval_seconds, Some(300));
         assert_eq!(entries[0].schedule.minute, "15");
         assert_eq!(entries[0].command, "/usr/bin/true");
@@ -862,6 +1035,7 @@ mod tests {
             command: "/usr/bin/true".to_string(),
             label: Some("com.example.job".to_string()),
             source: Some(PathBuf::from("/tmp/com.example.job.plist")),
+            template: Some("logged".to_string()),
             interval_seconds: Some(300),
         };
 
@@ -869,8 +1043,10 @@ mod tests {
             format_entries_file(&[entry]),
             "# macron crontab\n\
              # minute hour day-of-month month day-of-week command\n\
+             # built-in templates: basic, logged, environment\n\
              # macron:source=/tmp/com.example.job.plist\n\
              # macron:label=com.example.job\n\
+             # macron:template=logged\n\
              # macron:start-interval=300\n\
              0 9 * * * /usr/bin/true\n"
         );
@@ -904,12 +1080,41 @@ mod tests {
             command: "/usr/bin/true".to_string(),
             label: Some("com.example.interval".to_string()),
             source: None,
+            template: None,
             interval_seconds: Some(300),
         };
 
         let job = entry_to_launchd_job(&entry, 0).unwrap();
         assert!(job.start_calendar_interval.is_none());
         assert_eq!(job.start_interval, Some(300));
+    }
+
+    #[test]
+    fn logged_template_preserves_logging_fields_on_export() {
+        let entry = CronEntry {
+            schedule: CronSchedule {
+                minute: "0".to_string(),
+                hour: "2".to_string(),
+                day_of_month: "*".to_string(),
+                month: "*".to_string(),
+                day_of_week: "*".to_string(),
+            },
+            command: "/usr/bin/true".to_string(),
+            label: Some("com.example.logged".to_string()),
+            source: None,
+            template: Some("logged".to_string()),
+            interval_seconds: None,
+        };
+
+        let value = entry_to_launchd_value(&entry, 0, Path::new("/tmp/macron/crontab")).unwrap();
+        let dict = value.as_dictionary().unwrap();
+        assert_eq!(
+            dict.get("RunAtLoad").and_then(Value::as_boolean),
+            Some(false)
+        );
+        assert!(dict.contains_key("StandardOutPath"));
+        assert!(dict.contains_key("StandardErrorPath"));
+        assert!(dict.contains_key("StartCalendarInterval"));
     }
 
     #[test]
