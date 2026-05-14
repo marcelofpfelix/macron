@@ -8,6 +8,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, IsTerminal, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -209,12 +211,8 @@ fn edit_store(store: &Path) -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
-    let editor = env::var_os("VISUAL")
-        .filter(|value| !value.is_empty())
-        .or_else(|| env::var_os("EDITOR").filter(|value| !value.is_empty()))
-        .unwrap_or_else(|| OsString::from("vi"));
-    let editor_display = editor.to_string_lossy().to_string();
-    let mut command = editor_command(&editor)?;
+    let mut command = editor_command_from_candidates(editor_candidates())?;
+    let editor_display = command.get_program().to_string_lossy().to_string();
     let status = command.arg(store).status().map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -227,15 +225,81 @@ fn edit_store(store: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn editor_command(editor: &OsString) -> Result<Command, Box<dyn std::error::Error>> {
+fn editor_candidates() -> Vec<OsString> {
+    let mut candidates: Vec<OsString> = ["VISUAL", "EDITOR"]
+        .into_iter()
+        .filter_map(|name| env::var_os(name).filter(|value| !value.is_empty()))
+        .collect();
+    candidates.extend(["nvim", "vim", "vi"].map(OsString::from));
+    candidates
+}
+
+fn editor_command_from_candidates<I>(editors: I) -> Result<Command, Box<dyn std::error::Error>>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let path = env::var_os("PATH").unwrap_or_default();
+    let mut attempted = Vec::new();
+
+    for editor in editors {
+        match editor_command_with_path(&editor, &path) {
+            Ok(command) => return Ok(command),
+            Err(error) => attempted.push(error.to_string()),
+        }
+    }
+
+    Err(format!("no usable editor found ({})", attempted.join("; ")).into())
+}
+
+fn editor_command_with_path(
+    editor: &OsString,
+    path: &OsString,
+) -> Result<Command, Box<dyn std::error::Error>> {
     let editor = editor.to_string_lossy();
     let parts = shell_words::split(&editor)?;
     let Some((program, args)) = parts.split_first() else {
         return Err("editor command is empty".into());
     };
-    let mut command = Command::new(program);
+    let resolved = resolve_editor_program(program, path)
+        .ok_or_else(|| format!("editor `{program}` was not found on PATH"))?;
+    let mut command = Command::new(resolved);
     command.args(args);
     Ok(command)
+}
+
+fn resolve_editor_program(program: &str, path: &OsString) -> Option<PathBuf> {
+    let program_path = Path::new(program);
+    if is_executable_file(program_path) {
+        return Some(program_path.to_path_buf());
+    }
+
+    let lookup_name = program_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+
+    env::split_paths(path)
+        .map(|directory| directory.join(lookup_name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn print_store(store: &Path, color: OutputColor) -> io::Result<()> {
@@ -1096,9 +1160,38 @@ mod tests {
 
     #[test]
     fn editor_command_accepts_arguments() {
-        let command = editor_command(&OsString::from("code --wait")).unwrap();
-        assert_eq!(command.get_program(), "code");
-        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["--wait"]);
+        let command =
+            editor_command_with_path(&OsString::from("/bin/sh -c"), &OsString::new()).unwrap();
+        assert_eq!(command.get_program(), Path::new("/bin/sh"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["-c"]);
+    }
+
+    #[test]
+    fn editor_command_resolves_program_on_path() {
+        let path = OsString::from("/bin:/usr/bin");
+        let command = editor_command_with_path(&OsString::from("sh -c"), &path).unwrap();
+        assert_eq!(command.get_program(), Path::new("/bin/sh"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["-c"]);
+    }
+
+    #[test]
+    fn editor_command_falls_back_from_missing_absolute_path_to_path_basename() {
+        let path = OsString::from("/bin:/usr/bin");
+        let command =
+            editor_command_with_path(&OsString::from("/missing/bin/sh -c"), &path).unwrap();
+        assert_eq!(command.get_program(), Path::new("/bin/sh"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["-c"]);
+    }
+
+    #[test]
+    fn editor_command_tries_next_candidate_when_first_is_missing() {
+        let command = editor_command_from_candidates([
+            OsString::from("/missing/bin/not-an-editor"),
+            OsString::from("sh -c"),
+        ])
+        .unwrap();
+        assert_eq!(Path::new(command.get_program()).file_name().unwrap(), "sh");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["-c"]);
     }
 
     #[test]
