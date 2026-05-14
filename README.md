@@ -72,7 +72,12 @@ The binary is written to `dist/macron-v0.1.0-macos-<arch>`.
 ```sh
 macron list
 macron import [plist-or-directory ...]
+macron import --template logged [plist-or-directory ...]
 macron export [-o output-directory]
+macron template init
+macron template list
+macron template add <name> <template.plist.j2>
+macron template select <label> <name-or-path>
 macron -e
 ```
 
@@ -101,53 +106,91 @@ appending duplicate entries.
 
 ## Templates
 
-Imported jobs save their original plist as a per-label template under:
+Templates are reusable MiniJinja plist files under:
 
 ```text
 ~/.macron/templates/
 ```
 
-On export, `macron` loads the template and updates only the managed fields:
+Imports do not create per-job templates. Imported jobs stay as plain crontab
+entries unless you explicitly assign a template.
 
-```text
-Label
-ProgramArguments
-StartCalendarInterval
-StartInterval
+Create editable starter templates:
+
+```sh
+macron template init
 ```
 
-That preserves fields such as `EnvironmentVariables`, `StandardOutPath`,
-`StandardErrorPath`, `RunAtLoad`, and `KeepAlive`.
+That writes:
 
-For jobs created from scratch in `macron -e`, add one of the generic built-in
-templates before the cron line:
+```text
+~/.macron/templates/basic.plist.j2
+~/.macron/templates/logged.plist.j2
+~/.macron/templates/environment.plist.j2
+```
+
+Use a template while importing:
+
+```sh
+macron import --template logged
+```
+
+Or assign one later by label:
+
+```sh
+macron template select com.example.backup logged
+```
+
+The crontab metadata is just:
 
 ```cron
 # macron:label=com.example.backup
-# macron:template=basic
-0 2 * * * /Users/me/bin/backup
-
-# macron:label=com.example.logged
 # macron:template=logged
-*/15 * * * * /Users/me/bin/sync
-
-# macron:label=com.example.env
-# macron:template=environment
-0 * * * * /Users/me/bin/job
+0 2 * * * /Users/me/bin/backup
 ```
 
-Built-in templates:
+Add your own template:
 
-- `basic`: minimal launchd plist.
-- `logged`: adds `RunAtLoad=false`, stdout log, and stderr log paths.
-- `environment`: adds `RunAtLoad=false` and a Homebrew-friendly `PATH`.
+```sh
+macron template add launchctl-safe ~/templates/launchctl-safe.plist.j2
+```
 
-Custom templates are also supported:
+Templates receive these variables:
 
-```cron
-# macron:label=com.example.custom
-# macron:template=/Users/me/templates/custom.plist
-0 3 * * * /Users/me/bin/custom-job
+```text
+label
+safe_label
+index
+command
+home
+log_dir
+program_arguments_xml
+schedule_xml
+interval_seconds
+schedule.minute
+schedule.hour
+schedule.day_of_month
+schedule.month
+schedule.day_of_week
+```
+
+Example template:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<key>Label</key>
+<string>{{ label|escape }}</string>
+{{ program_arguments_xml|safe }}
+{{ schedule_xml|safe }}
+<key>RunAtLoad</key>
+<false/>
+<key>StandardOutPath</key>
+<string>{{ log_dir|escape }}/{{ safe_label|escape }}.out.log</string>
+</dict>
+</plist>
 ```
 
 ## Supported Schedules
