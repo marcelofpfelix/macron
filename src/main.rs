@@ -210,13 +210,32 @@ fn edit_store(store: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let editor = env::var_os("VISUAL")
-        .or_else(|| env::var_os("EDITOR"))
+        .filter(|value| !value.is_empty())
+        .or_else(|| env::var_os("EDITOR").filter(|value| !value.is_empty()))
         .unwrap_or_else(|| OsString::from("vi"));
-    let status = Command::new(editor).arg(store).status()?;
+    let editor_display = editor.to_string_lossy().to_string();
+    let mut command = editor_command(&editor)?;
+    let status = command.arg(store).status().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to start editor `{editor_display}`: {error}"),
+        )
+    })?;
     if !status.success() {
-        return Err("editor exited unsuccessfully".into());
+        return Err(format!("editor `{editor_display}` exited unsuccessfully").into());
     }
     Ok(())
+}
+
+fn editor_command(editor: &OsString) -> Result<Command, Box<dyn std::error::Error>> {
+    let editor = editor.to_string_lossy();
+    let parts = shell_words::split(&editor)?;
+    let Some((program, args)) = parts.split_first() else {
+        return Err("editor command is empty".into());
+    };
+    let mut command = Command::new(program);
+    command.args(args);
+    Ok(command)
 }
 
 fn print_store(store: &Path, color: OutputColor) -> io::Result<()> {
@@ -831,7 +850,15 @@ fn resolve_template_value(
         "basic" => Ok(builtin_template_basic()),
         "logged" => Ok(builtin_template_logged(label)),
         "environment" => Ok(builtin_template_environment()),
-        path => Ok(Value::from_file(expand_home(path))?),
+        path => {
+            let path = expand_home(path);
+            Ok(Value::from_file(&path).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to read template `{}`: {error}",
+                    path.display()
+                ))
+            })?)
+        }
     }
 }
 
@@ -1065,6 +1092,13 @@ mod tests {
         assert!(rendered.contains("\u{1b}["));
         assert!(rendered.contains("# comment"));
         assert!(rendered.contains("/bin/bash"));
+    }
+
+    #[test]
+    fn editor_command_accepts_arguments() {
+        let command = editor_command(&OsString::from("code --wait")).unwrap();
+        assert_eq!(command.get_program(), "code");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["--wait"]);
     }
 
     #[test]
