@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.51", features = ["derive"] }
+owo-colors = "4.2.3"
 plist = "1.8.0"
 serde = { version = "1.0.228", features = ["derive"] }
 shell-words = "1.1.0"

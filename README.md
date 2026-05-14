@@ -32,6 +32,14 @@ macron --system
 macron --system import
 ```
 
+Crontab output is colorized automatically when stdout is a terminal. Override it
+with:
+
+```sh
+macron --color always
+macron --color never
+```
+
 To build a native macOS release binary on macOS:
 
 ```sh

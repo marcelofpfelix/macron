@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use owo_colors::{OwoColorize, Style};
 use plist::{Dictionary, Value};
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
@@ -6,7 +7,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -32,8 +33,19 @@ struct Cli {
     #[arg(short = 'f', long = "file", global = true)]
     file: Option<PathBuf>,
 
+    /// When to colorize crontab output.
+    #[arg(long = "color", value_enum, default_value_t = OutputColor::Auto, global = true)]
+    color: OutputColor,
+
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum OutputColor {
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Debug, Subcommand)]
@@ -129,7 +141,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command.unwrap_or(Commands::List) {
         Commands::List => {
             refresh_store_from_paths(&store, default_import_paths(cli.system), io::sink())?;
-            print_store(&store)?;
+            print_store(&store, cli.color)?;
         }
         Commands::Import { paths } => import_plists(&store, paths, cli.system)?,
         Commands::Export { output } => export_store(&store, output)?,
@@ -182,15 +194,156 @@ fn edit_store(store: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn print_store(store: &Path) -> io::Result<()> {
+fn print_store(store: &Path, color: OutputColor) -> io::Result<()> {
     match fs::read_to_string(store) {
         Ok(contents) => {
-            print!("{contents}");
+            print!("{}", render_store(&contents, should_color(color)));
             Ok(())
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn should_color(color: OutputColor) -> bool {
+    match color {
+        OutputColor::Always => true,
+        OutputColor::Never => false,
+        OutputColor::Auto => io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
+    }
+}
+
+fn render_store(contents: &str, color: bool) -> String {
+    if !color {
+        return contents.to_string();
+    }
+
+    let mut rendered = String::new();
+    for line in contents.lines() {
+        rendered.push_str(&colorize_line(line));
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn colorize_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let leading_len = line.len() - trimmed.len();
+    let leading = &line[..leading_len];
+
+    if trimmed.is_empty() {
+        return line.to_string();
+    }
+
+    if let Some(metadata) = trimmed.strip_prefix("# macron:") {
+        let (key, value) = metadata.split_once('=').unwrap_or((metadata, ""));
+        return format!(
+            "{}{}{}{}{}",
+            leading,
+            "# macron:".style(comment_style()),
+            key.style(metadata_key_style()),
+            "=".style(comment_style()),
+            value.style(metadata_value_style())
+        );
+    }
+
+    if trimmed.starts_with('#') {
+        return format!("{leading}{}", trimmed.style(comment_style()));
+    }
+
+    colorize_cron_line(line)
+}
+
+fn colorize_cron_line(line: &str) -> String {
+    let fields = line.split_whitespace().take(6).collect::<Vec<_>>();
+    if fields.len() < 6 {
+        return line.to_string();
+    }
+
+    let Some(command_start) = nth_field_start(line, 5) else {
+        return line.to_string();
+    };
+    let leading_len = line.len() - line.trim_start().len();
+    let leading = &line[..leading_len];
+    let command = line[command_start..].trim();
+
+    format!(
+        "{}{} {} {} {} {} {}",
+        leading,
+        fields[0].style(minute_style()),
+        fields[1].style(hour_style()),
+        fields[2].style(day_style()),
+        fields[3].style(month_style()),
+        fields[4].style(weekday_style()),
+        colorize_shell(command)
+    )
+}
+
+fn colorize_shell(command: &str) -> String {
+    let Ok(tokens) = shell_words::split(command) else {
+        return command.style(command_style()).to_string();
+    };
+
+    let mut rendered = Vec::new();
+    for token in tokens {
+        let styled = if token.starts_with('-') {
+            token.style(shell_flag_style()).to_string()
+        } else if token.contains('/') || token.ends_with(".sh") {
+            shell_words::quote(&token)
+                .style(shell_path_style())
+                .to_string()
+        } else {
+            shell_words::quote(&token)
+                .style(command_style())
+                .to_string()
+        };
+        rendered.push(styled);
+    }
+    rendered.join(" ")
+}
+
+fn comment_style() -> Style {
+    Style::new().bright_black()
+}
+
+fn metadata_key_style() -> Style {
+    Style::new().blue().bold()
+}
+
+fn metadata_value_style() -> Style {
+    Style::new().cyan()
+}
+
+fn minute_style() -> Style {
+    Style::new().cyan().bold()
+}
+
+fn hour_style() -> Style {
+    Style::new().green().bold()
+}
+
+fn day_style() -> Style {
+    Style::new().yellow().bold()
+}
+
+fn month_style() -> Style {
+    Style::new().magenta().bold()
+}
+
+fn weekday_style() -> Style {
+    Style::new().red().bold()
+}
+
+fn command_style() -> Style {
+    Style::new().white()
+}
+
+fn shell_path_style() -> Style {
+    Style::new().bright_green()
+}
+
+fn shell_flag_style() -> Style {
+    Style::new().bright_yellow()
 }
 
 fn seed_store_if_needed(
@@ -721,6 +874,21 @@ mod tests {
              # macron:start-interval=300\n\
              0 9 * * * /usr/bin/true\n"
         );
+    }
+
+    #[test]
+    fn render_store_plain_preserves_contents() {
+        let contents = "# comment\n0 9 * * * /bin/bash -c 'echo hi'\n";
+        assert_eq!(render_store(contents, false), contents);
+    }
+
+    #[test]
+    fn render_store_colorizes_comments_and_cron_lines() {
+        let contents = "# comment\n0 9 * * * /bin/bash -c 'echo hi'\n";
+        let rendered = render_store(contents, true);
+        assert!(rendered.contains("\u{1b}["));
+        assert!(rendered.contains("# comment"));
+        assert!(rendered.contains("/bin/bash"));
     }
 
     #[test]
