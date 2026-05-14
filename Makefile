@@ -6,7 +6,7 @@ UNAME_M := $(shell uname -m)
 MACOS_TARGET ?= aarch64-apple-darwin
 MACOS_ARCH := $(if $(findstring aarch64,$(MACOS_TARGET)),arm64,x86_64)
 
-.PHONY: all build release macos-binary macos-cross-binary run test fmt fmt-check lint check pre install-hooks clean help
+.PHONY: all build release install uninstall macos-binary macos-cross-binary run test fmt fmt-check lint check pre install-hooks clean help
 
 all: check build
 
@@ -15,6 +15,12 @@ build: ## build the binary
 
 release: ## build the optimized release binary
 	$(CARGO) build --release --locked
+
+install: ## install macron locally with cargo install --path .
+	$(CARGO) install --path . --locked
+
+uninstall: ## uninstall macron from Cargo's local bin directory
+	$(CARGO) uninstall $(BINARY_NAME)
 
 macos-binary: ## build an optimized native macOS binary in dist/
 	@test "$(UNAME_S)" = "Darwin" || (echo "macos-binary must be run on macOS; for Linux cross-builds use: make macos-cross-binary MACOS_TARGET=aarch64-apple-darwin" && exit 1)

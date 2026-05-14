@@ -18,6 +18,25 @@ macron
 macron -e
 ```
 
+Install locally with Cargo:
+
+```sh
+make install
+```
+
+This runs `cargo install --path . --locked` and installs `macron` into Cargo's
+local bin directory, usually:
+
+```text
+~/.cargo/bin/macron
+```
+
+Make sure `~/.cargo/bin` is on `PATH`. Remove it with:
+
+```sh
+make uninstall
+```
+
 Running `macron` with no subcommand scans the default user and local launchd
 plist directories, refreshes the local crontab-format file, and prints it.
 Running `macron -e` edits that same file and then exports plist files to
