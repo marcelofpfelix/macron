@@ -24,6 +24,10 @@ struct Cli {
     #[arg(short = 'e', long = "edit", global = true)]
     edit: bool,
 
+    /// Include Apple OS-managed /System/Library launchd jobs when discovering schedules.
+    #[arg(long = "system", global = true)]
+    system: bool,
+
     /// Use a custom local crontab-format file.
     #[arg(short = 'f', long = "file", global = true)]
     file: Option<PathBuf>,
@@ -57,6 +61,7 @@ struct CronEntry {
     command: String,
     label: Option<String>,
     source: Option<PathBuf>,
+    interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +78,10 @@ struct CronSchedule {
 struct LaunchdJob {
     label: String,
     program_arguments: Vec<String>,
-    start_calendar_interval: CalendarInterval,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_calendar_interval: Option<CalendarInterval>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_interval: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     working_directory: Option<String>,
 }
@@ -112,7 +120,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = cli.file.unwrap_or_else(default_store_path);
 
     if cli.edit {
-        seed_store_if_needed(&store)?;
+        seed_store_if_needed(&store, cli.system)?;
         edit_store(&store)?;
         export_store(&store, None)?;
         return Ok(());
@@ -120,10 +128,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command.unwrap_or(Commands::List) {
         Commands::List => {
-            refresh_store_from_paths(&store, default_import_paths(), io::sink())?;
+            refresh_store_from_paths(&store, default_import_paths(cli.system), io::sink())?;
             print_store(&store)?;
         }
-        Commands::Import { paths } => import_plists(&store, paths)?,
+        Commands::Import { paths } => import_plists(&store, paths, cli.system)?,
         Commands::Export { output } => export_store(&store, output)?,
         Commands::File => println!("{}", store.display()),
     }
@@ -185,7 +193,10 @@ fn print_store(store: &Path) -> io::Result<()> {
     }
 }
 
-fn seed_store_if_needed(store: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn seed_store_if_needed(
+    store: &Path,
+    include_system: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let needs_seed = match fs::read_to_string(store) {
         Ok(contents) => contents.trim().is_empty(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => true,
@@ -193,15 +204,19 @@ fn seed_store_if_needed(store: &Path) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     if needs_seed {
-        refresh_store_from_paths(store, default_import_paths(), io::sink())?;
+        refresh_store_from_paths(store, default_import_paths(include_system), io::sink())?;
     }
 
     Ok(())
 }
 
-fn import_plists(store: &Path, paths: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn import_plists(
+    store: &Path,
+    paths: Vec<PathBuf>,
+    include_system: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let paths = if paths.is_empty() {
-        default_import_paths()
+        default_import_paths(include_system)
     } else {
         paths
     };
@@ -244,6 +259,9 @@ fn format_entries_file(entries: &[CronEntry]) -> String {
         if let Some(label) = &entry.label {
             contents.push_str(&format!("# macron:label={label}\n"));
         }
+        if let Some(interval_seconds) = entry.interval_seconds {
+            contents.push_str(&format!("# macron:start-interval={interval_seconds}\n"));
+        }
         contents.push_str(&format!("{}\n", format_entry(entry)));
     }
     contents
@@ -268,12 +286,17 @@ fn export_store(store: &Path, output: Option<PathBuf>) -> Result<(), Box<dyn std
     Ok(())
 }
 
-fn default_import_paths() -> Vec<PathBuf> {
-    vec![
+fn default_import_paths(include_system: bool) -> Vec<PathBuf> {
+    let mut paths = vec![
         home_dir().join("Library").join("LaunchAgents"),
         PathBuf::from("/Library/LaunchAgents"),
         PathBuf::from("/Library/LaunchDaemons"),
-    ]
+    ];
+    if include_system {
+        paths.push(PathBuf::from("/System/Library/LaunchAgents"));
+        paths.push(PathBuf::from("/System/Library/LaunchDaemons"));
+    }
+    paths
 }
 
 fn plist_files(paths: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
@@ -317,10 +340,11 @@ fn plist_to_entries(path: &Path) -> Result<Vec<CronEntry>, Box<dyn std::error::E
         .and_then(Value::as_string)
         .map(str::to_owned);
     let command = launchd_command(dict).ok_or("missing ProgramArguments or Program")?;
-    let schedules = if let Some(intervals) = dict.get("StartCalendarInterval") {
-        calendar_value_to_schedules(intervals)?
+    let (schedules, interval_seconds) = if let Some(intervals) = dict.get("StartCalendarInterval") {
+        (calendar_value_to_schedules(intervals)?, None)
     } else if let Some(interval) = dict.get("StartInterval") {
-        vec![start_interval_to_schedule(interval)?]
+        let seconds = start_interval_seconds(interval)?;
+        (vec![start_interval_to_schedule(seconds)?], Some(seconds))
     } else {
         return Err("missing StartCalendarInterval or StartInterval".into());
     };
@@ -332,6 +356,7 @@ fn plist_to_entries(path: &Path) -> Result<Vec<CronEntry>, Box<dyn std::error::E
             command: command.clone(),
             label: label.clone(),
             source: Some(path.to_path_buf()),
+            interval_seconds,
         })
         .collect())
 }
@@ -353,11 +378,15 @@ fn launchd_command(dict: &Dictionary) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn start_interval_to_schedule(value: &Value) -> Result<CronSchedule, Box<dyn std::error::Error>> {
+fn start_interval_seconds(value: &Value) -> Result<u64, Box<dyn std::error::Error>> {
     let seconds = value
         .as_unsigned_integer()
         .ok_or("StartInterval is not an unsigned integer")?;
-    if seconds == 0 || seconds % 60 != 0 {
+    Ok(seconds)
+}
+
+fn start_interval_to_schedule(seconds: u64) -> Result<CronSchedule, Box<dyn std::error::Error>> {
+    if seconds == 0 || !seconds.is_multiple_of(60) {
         return Err(
             format!("StartInterval {seconds} cannot be represented in crontab minutes").into(),
         );
@@ -368,7 +397,7 @@ fn start_interval_to_schedule(value: &Value) -> Result<CronSchedule, Box<dyn std
         1 => ("*".to_string(), "*".to_string()),
         2..=59 => (format!("*/{minutes}"), "*".to_string()),
         60 => ("0".to_string(), "*".to_string()),
-        61..=1439 if minutes % 60 == 0 => ("0".to_string(), format!("*/{}", minutes / 60)),
+        61..=1439 if minutes.is_multiple_of(60) => ("0".to_string(), format!("*/{}", minutes / 60)),
         1440 => ("0".to_string(), "0".to_string()),
         _ => {
             return Err(format!(
@@ -427,6 +456,7 @@ fn parse_crontab(contents: &str) -> Result<Vec<CronEntry>, Box<dyn std::error::E
     let mut entries = Vec::new();
     let mut pending_label = None;
     let mut pending_source = None;
+    let mut pending_interval_seconds = None;
 
     for (line_number, raw_line) in contents.lines().enumerate() {
         let line = raw_line.trim();
@@ -438,6 +468,8 @@ fn parse_crontab(contents: &str) -> Result<Vec<CronEntry>, Box<dyn std::error::E
                 pending_label = Some(label.trim().to_string());
             } else if let Some(source) = metadata.strip_prefix("source=") {
                 pending_source = Some(PathBuf::from(source.trim()));
+            } else if let Some(interval_seconds) = metadata.strip_prefix("start-interval=") {
+                pending_interval_seconds = Some(interval_seconds.trim().parse::<u64>()?);
             }
             continue;
         }
@@ -466,6 +498,7 @@ fn parse_crontab(contents: &str) -> Result<Vec<CronEntry>, Box<dyn std::error::E
             command: raw_line[command_start..].trim().to_string(),
             label: pending_label.take(),
             source: pending_source.take(),
+            interval_seconds: pending_interval_seconds.take(),
         };
         entries.push(entry);
     }
@@ -519,7 +552,12 @@ fn entry_to_launchd_job(
             "-lc".to_string(),
             entry.command.clone(),
         ],
-        start_calendar_interval: schedule_to_calendar_interval(&entry.schedule)?,
+        start_calendar_interval: if entry.interval_seconds.is_some() {
+            None
+        } else {
+            Some(schedule_to_calendar_interval(&entry.schedule)?)
+        },
+        start_interval: entry.interval_seconds,
         working_directory: None,
     })
 }
@@ -649,10 +687,11 @@ mod tests {
 
     #[test]
     fn parses_crontab_with_metadata() {
-        let contents = "# macron:label=com.example.job\n15 3 * * 1 /usr/bin/true\n";
+        let contents = "# macron:label=com.example.job\n# macron:start-interval=300\n15 3 * * 1 /usr/bin/true\n";
         let entries = parse_crontab(contents).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].label.as_deref(), Some("com.example.job"));
+        assert_eq!(entries[0].interval_seconds, Some(300));
         assert_eq!(entries[0].schedule.minute, "15");
         assert_eq!(entries[0].command, "/usr/bin/true");
     }
@@ -670,6 +709,7 @@ mod tests {
             command: "/usr/bin/true".to_string(),
             label: Some("com.example.job".to_string()),
             source: Some(PathBuf::from("/tmp/com.example.job.plist")),
+            interval_seconds: Some(300),
         };
 
         assert_eq!(
@@ -678,8 +718,30 @@ mod tests {
              # minute hour day-of-month month day-of-week command\n\
              # macron:source=/tmp/com.example.job.plist\n\
              # macron:label=com.example.job\n\
+             # macron:start-interval=300\n\
              0 9 * * * /usr/bin/true\n"
         );
+    }
+
+    #[test]
+    fn start_interval_entry_exports_as_start_interval() {
+        let entry = CronEntry {
+            schedule: CronSchedule {
+                minute: "*/5".to_string(),
+                hour: "*".to_string(),
+                day_of_month: "*".to_string(),
+                month: "*".to_string(),
+                day_of_week: "*".to_string(),
+            },
+            command: "/usr/bin/true".to_string(),
+            label: Some("com.example.interval".to_string()),
+            source: None,
+            interval_seconds: Some(300),
+        };
+
+        let job = entry_to_launchd_job(&entry, 0).unwrap();
+        assert!(job.start_calendar_interval.is_none());
+        assert_eq!(job.start_interval, Some(300));
     }
 
     #[test]
@@ -713,7 +775,7 @@ mod tests {
 
     #[test]
     fn launchd_start_interval_becomes_cron_step() {
-        let schedule = start_interval_to_schedule(&Value::Integer(300.into())).unwrap();
+        let schedule = start_interval_to_schedule(300).unwrap();
         assert_eq!(schedule.minute, "*/5");
         assert_eq!(schedule.hour, "*");
         assert_eq!(schedule.day_of_month, "*");
@@ -721,7 +783,7 @@ mod tests {
 
     #[test]
     fn launchd_hourly_start_interval_becomes_hourly_cron() {
-        let schedule = start_interval_to_schedule(&Value::Integer(3600.into())).unwrap();
+        let schedule = start_interval_to_schedule(3600).unwrap();
         assert_eq!(schedule.minute, "0");
         assert_eq!(schedule.hour, "*");
     }

@@ -24,6 +24,14 @@ Running `macron -e` edits that same file and then exports plist files to
 `~/Library/LaunchAgents`. If the file does not exist yet, `macron -e` seeds it
 from the detected launchd schedules before opening the editor.
 
+Add `--system` to include Apple OS-managed jobs from `/System/Library` in
+discovery:
+
+```sh
+macron --system
+macron --system import
+```
+
 To build a native macOS release binary on macOS:
 
 ```sh
@@ -52,6 +60,13 @@ When importing without paths, `macron` scans:
 /Library/LaunchDaemons
 ```
 
+With `--system`, it also scans:
+
+```text
+/System/Library/LaunchAgents
+/System/Library/LaunchDaemons
+```
+
 Detected and imported jobs are stored as normal five-field crontab lines with
 nearby metadata comments preserving the launchd label and source file. Running
 `macron import` refreshes the local file from the selected plist paths instead of
@@ -64,6 +79,8 @@ appending duplicate entries.
 - single `StartCalendarInterval` dictionaries
 - arrays of `StartCalendarInterval` dictionaries
 - numeric cron fields, `*`, comma lists, ranges, and steps
+- `StartInterval` jobs that can be represented as whole-minute cron intervals
 
 Exported jobs use `ProgramArguments` with `/bin/sh -lc <command>` so shell-style
-crontab commands are preserved.
+crontab commands are preserved. Imported `StartInterval` jobs are marked with
+`# macron:start-interval=<seconds>` and export back as `StartInterval`.
