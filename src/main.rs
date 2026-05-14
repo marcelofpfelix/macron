@@ -317,11 +317,14 @@ fn plist_to_entries(path: &Path) -> Result<Vec<CronEntry>, Box<dyn std::error::E
         .and_then(Value::as_string)
         .map(str::to_owned);
     let command = launchd_command(dict).ok_or("missing ProgramArguments or Program")?;
-    let intervals = dict
-        .get("StartCalendarInterval")
-        .ok_or("missing StartCalendarInterval")?;
+    let schedules = if let Some(intervals) = dict.get("StartCalendarInterval") {
+        calendar_value_to_schedules(intervals)?
+    } else if let Some(interval) = dict.get("StartInterval") {
+        vec![start_interval_to_schedule(interval)?]
+    } else {
+        return Err("missing StartCalendarInterval or StartInterval".into());
+    };
 
-    let schedules = calendar_value_to_schedules(intervals)?;
     Ok(schedules
         .into_iter()
         .map(|schedule| CronEntry {
@@ -348,6 +351,40 @@ fn launchd_command(dict: &Dictionary) -> Option<String> {
     dict.get("Program")
         .and_then(Value::as_string)
         .map(str::to_owned)
+}
+
+fn start_interval_to_schedule(value: &Value) -> Result<CronSchedule, Box<dyn std::error::Error>> {
+    let seconds = value
+        .as_unsigned_integer()
+        .ok_or("StartInterval is not an unsigned integer")?;
+    if seconds == 0 || seconds % 60 != 0 {
+        return Err(
+            format!("StartInterval {seconds} cannot be represented in crontab minutes").into(),
+        );
+    }
+
+    let minutes = seconds / 60;
+    let (minute, hour) = match minutes {
+        1 => ("*".to_string(), "*".to_string()),
+        2..=59 => (format!("*/{minutes}"), "*".to_string()),
+        60 => ("0".to_string(), "*".to_string()),
+        61..=1439 if minutes % 60 == 0 => ("0".to_string(), format!("*/{}", minutes / 60)),
+        1440 => ("0".to_string(), "0".to_string()),
+        _ => {
+            return Err(format!(
+                "StartInterval {seconds} cannot be represented as a simple five-field crontab schedule"
+            )
+            .into());
+        }
+    };
+
+    Ok(CronSchedule {
+        minute,
+        hour,
+        day_of_month: "*".to_string(),
+        month: "*".to_string(),
+        day_of_week: "*".to_string(),
+    })
 }
 
 fn calendar_value_to_schedules(
@@ -672,5 +709,20 @@ mod tests {
         assert_eq!(schedule.hour, "7");
         assert_eq!(schedule.day_of_month, "*");
         assert_eq!(schedule.day_of_week, "2");
+    }
+
+    #[test]
+    fn launchd_start_interval_becomes_cron_step() {
+        let schedule = start_interval_to_schedule(&Value::Integer(300.into())).unwrap();
+        assert_eq!(schedule.minute, "*/5");
+        assert_eq!(schedule.hour, "*");
+        assert_eq!(schedule.day_of_month, "*");
+    }
+
+    #[test]
+    fn launchd_hourly_start_interval_becomes_hourly_cron() {
+        let schedule = start_interval_to_schedule(&Value::Integer(3600.into())).unwrap();
+        assert_eq!(schedule.minute, "0");
+        assert_eq!(schedule.hour, "*");
     }
 }
