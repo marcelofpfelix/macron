@@ -426,11 +426,7 @@ fn cpu_busy_percent(current: CpuSample, previous: Option<CpuSample>) -> Option<u
     let active = current.active.checked_sub(previous.active)?;
     let idle = current.idle.checked_sub(previous.idle)?;
     let total = active + idle;
-    if total == 0 {
-        None
-    } else {
-        Some(active * 100 / total)
-    }
+    active.checked_mul(100)?.checked_div(total)
 }
 
 fn native_mem(name: &str) -> StatusItem {
@@ -1098,6 +1094,15 @@ mod tests {
             idle: 970,
         };
         assert_eq!(cpu_busy_percent(current, Some(previous)), Some(30));
+    }
+
+    #[test]
+    fn cpu_percent_returns_none_for_empty_delta() {
+        let sample = CpuSample {
+            active: 100,
+            idle: 900,
+        };
+        assert_eq!(cpu_busy_percent(sample, Some(sample)), None);
     }
 
     #[test]
