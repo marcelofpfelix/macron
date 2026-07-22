@@ -18,20 +18,15 @@ macron
 macron -e
 ```
 
-Install locally with Cargo from this directory:
+Install locally into `~/bin` from this directory:
 
 ```sh
 make install
 ```
 
-This runs `cargo install --path . --locked` and installs `macron` into Cargo's
-local bin directory, usually:
-
-```text
-~/.cargo/bin/macron
-```
-
-Make sure `~/.cargo/bin` is on `PATH`. Remove it with:
+This builds a release binary and copies it to `~/bin/macron`. Use
+`make install BIN_DIR=/usr/local/bin` for another destination. Cargo install is
+still available with `make install-cargo`. Remove the Cargo-installed binary with:
 
 ```sh
 make uninstall
