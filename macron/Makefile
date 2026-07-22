@@ -1,6 +1,7 @@
 BINARY_NAME := macron
 VERSION := 0.1.0
 CARGO := cargo
+BIN_DIR ?= $(HOME)/bin
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 MACOS_TARGET ?= aarch64-apple-darwin
@@ -8,7 +9,7 @@ MACOS_ARCH := $(if $(findstring aarch64,$(MACOS_TARGET)),arm64,x86_64)
 CARGO_TARGET_DIR ?= ../target
 export CARGO_TARGET_DIR
 
-.PHONY: all build release install uninstall macos-binary macos-cross-binary run test fmt fmt-check lint check pre install-hooks clean help
+.PHONY: all build release install install-cargo uninstall macos-binary macos-cross-binary run test fmt fmt-check lint check pre install-hooks clean help
 
 all: check build
 
@@ -18,7 +19,11 @@ build: ## build the binary
 release: ## build the optimized release binary
 	$(CARGO) build --release --locked
 
-install: ## install macron locally
+install: release ## install macron into BIN_DIR, default ~/bin
+	install -d "$(BIN_DIR)"
+	install -m 0755 "$(CARGO_TARGET_DIR)/release/$(BINARY_NAME)" "$(BIN_DIR)/$(BINARY_NAME)"
+
+install-cargo: ## install macron with cargo install --path .
 	$(CARGO) install --path . --locked
 
 uninstall: ## uninstall macron from Cargo's local bin directory

@@ -1,0 +1,19 @@
+[package]
+name = "amt"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Small Intel AMT power and boot control CLI"
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+dirs = "6"
+md-5 = "0.10"
+quick-xml = "0.38"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde.workspace = true
+sha2 = "0.10"
+toml.workspace = true
+uuid = { version = "1", features = ["v4"] }
