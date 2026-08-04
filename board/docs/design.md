@@ -179,3 +179,459 @@ Native checks should return structured values internally so rendering and metric
 5. Move Quickshell `scripts` from command check to native event check.
 6. Add structured values to native checks for metrics.
 7. Split `alerts` into read-only native status and optional action commands.
+
+## Reviewed Dashboard Design
+
+Board should combine the best parts of three existing ideas:
+
+- `wtfutil`: module registry, per-module config, grid layout, refresh
+  intervals, focus/navigation, and a large set of small focused widgets.
+- `dboard`: simple command panels, readable YAML-style layout, and async
+  execution for quick experiments.
+- current `board`: native Rust checks, Quickshell/tmux output compatibility,
+  local status thresholds, and a path away from repeated shell polling.
+
+The reusable product is not a Quickshell config or a TUI. It is the shared
+runtime model:
+
+```text
+config files
+  modules, actions, surfaces, layouts, thresholds
+        |
+        v
+rush-core
+  shared schemas, health model, render model, config parser
+        |
+        v
+boardd
+  async scheduler, native collectors, command runners, hooks, cache
+        |
+        +-- board once/status/action
+        +-- board tui
+        +-- tmux status
+        +-- Quickshell popups/bar/dashboard
+```
+
+Only one process should collect state: `boardd`. Every UI consumes that state.
+Quickshell renders graphical bars and popups. A TUI renders the same model in a
+terminal. tmux reads compact status text. The CLI prints one-shot snapshots and
+executes explicit actions.
+
+## Module Model
+
+Use a `wtfutil`-style module model, but make native Rust modules the default.
+Command modules remain available as the `dboard`-style escape hatch.
+
+```toml
+[modules.cpu]
+kind = "native.cpu"
+enabled = true
+interval = "2s"
+surfaces = ["bar", "dashboard"]
+warning = 80
+critical = 90
+
+[modules.gsync]
+kind = "command"
+enabled = true
+command = ["gsync", "--status"]
+interval = "10m"
+timeout = "5s"
+surfaces = ["dashboard"]
+
+[modules.weather]
+kind = "command"
+enabled = false
+command = ["check-weather"]
+interval = "30m"
+```
+
+Initial module kinds:
+
+- `native.cpu`
+- `native.mem`
+- `native.temp`
+- `native.docker`
+- `native.time`
+- `native.calendar`
+- `native.power`
+- `native.network`
+- `native.script-events`
+- `command`
+- `file`
+- `http`
+- `action-group`
+
+Each module emits the same state shape:
+
+```json
+{
+  "id": "cpu",
+  "title": "CPU",
+  "health": "warning",
+  "text": "cpu 82%",
+  "lines": ["CPU 82%", "load 3.1 2.7 1.8"],
+  "metrics": {
+    "usage_percent": 82
+  },
+  "updated_at": 1784740000,
+  "next_update_at": 1784740002,
+  "stale": false
+}
+```
+
+Health levels:
+
+- `ok`: no color by default
+- `warning`: yellow
+- `critical`: red
+- `unknown`: dim or neutral
+
+Do not render green as the default success state.
+
+## Layout Model
+
+Use `wtfutil`'s grid idea, but keep it frontend-neutral. A layout describes
+logical placement; each frontend maps it to its own rendering system.
+
+```toml
+[layouts.dashboard]
+columns = [24, 24, 32]
+rows = [4, 8, 8, 8]
+
+[[layouts.dashboard.widgets]]
+module = "cpu"
+x = 0
+y = 0
+w = 1
+h = 1
+
+[[layouts.dashboard.widgets]]
+module = "docker"
+x = 1
+y = 0
+w = 2
+h = 1
+```
+
+Quickshell maps widgets to QML panels and popup regions. `board tui` maps them
+to terminal regions. tmux ignores full layouts and uses surfaces.
+
+## Module Boundaries
+
+Native modules should move out of `board/src/main.rs` before adding many more
+kinds. The target shape is a small registry plus one folder per module family:
+
+```text
+board/src/modules/
+  mod.rs
+  cpu.rs
+  mem.rs
+  temp.rs
+  docker.rs
+  time.rs
+  calendar.rs
+  command.rs
+  script_events.rs
+```
+
+Each module implements one shared trait:
+
+```rust
+trait Module {
+    fn kind(&self) -> &'static str;
+    async fn run(&self, check: &CheckConfig, previous: Option<&CheckResult>) -> CheckResult;
+}
+```
+
+The registry maps config `kind` strings to module implementations:
+
+```text
+native-cpu      -> modules::cpu
+native-mem      -> modules::mem
+native-docker   -> modules::docker
+command         -> modules::command
+```
+
+That gives the same mental model as `wtfutil` modules or editor plugins:
+add one module file, register one kind, add focused tests. It also makes it
+safe to compile features later, for example `kamailio`, `nvim`, or `tmux`
+module groups, without loading that logic into the hot bar path.
+
+Do not build dynamic third-party loading yet. Start with in-tree modules and a
+stable trait. Add external plugin loading only when there are real out-of-tree
+modules to support.
+
+## Lessons From Local Module Docs
+
+The tel-proxy docs for Blackdog, Fone, Kamadbg, and the Kamailio module patching
+flow all point to the same useful shape for `board`:
+
+- keep modules in-tree first, with one obvious source file and one registry
+  entry per module;
+- make a module descriptor the source of truth for id, kind, default interval,
+  config keys, output shape, feature gate, docs path, and requirements;
+- keep runtime config explicit with `[modules].load = ["cpu", "mem"]`; do not
+  add broad `load_group` behavior;
+- report separate states for compiled, enabled, loaded, initialized, running,
+  and unavailable;
+- explain unavailable modules with stable reasons such as `not_compiled`,
+  `dependency_missing`, `policy_denied`, `conflict`, or `api_incompatible`;
+- treat external binaries, files, sockets, and services as requirements, not
+  module dependencies;
+- keep surface/UI text in Quickshell, TUI, or tmux renderers; modules should
+  return structured facts plus short labels, not own full UI layouts;
+- defer dynamic Rust crates, dylibs, WASM, Lua, and subprocess plugin protocols
+  until at least one real out-of-tree module needs that cost.
+
+This is enough plugin behavior for now: external developers can add or remove a
+module by adding one in-tree module folder, descriptor, registry entry, example
+config, docs, and tests. A runtime plugin ABI would be premature.
+
+## Frontends
+
+Quickshell should own desktop UI:
+
+- bar
+- dashboard popup
+- launcher popup
+- power/session popup
+- calendar popup
+- web search popup
+- passmenu popup
+- network, notification, and audio panels
+
+Quickshell should not own collection logic. It should not parse `/proc`, query
+Docker, execute check scripts in the hot path, or decide thresholds. It should
+render `boardd` state and call explicit `board action` commands.
+
+The TUI should use the same daemon/config:
+
+- full dashboard
+- action palette
+- module logs and errors
+- manual refresh
+- config inspection
+- SSH and tmux-friendly operation
+
+tmux should remain compact:
+
+- read `board render tmux` or `board once bar`
+- avoid independent polling loops when `boardd` is running
+- degrade gracefully when the daemon is absent
+
+## Actions
+
+Actions belong in the same runtime as status. Quickshell power menus, TUI
+action palettes, and CLI commands should call the same action definitions.
+
+```toml
+[actions.system.lock]
+label = "Lock"
+command = ["loginctl", "lock-session"]
+confirm = false
+
+[actions.system.suspend]
+label = "Suspend"
+command = ["systemctl", "suspend"]
+confirm = false
+
+[actions.system.hibernate]
+label = "Hibernate"
+command = ["systemctl", "hibernate"]
+confirm = true
+
+[actions.system.reboot]
+label = "Reboot"
+command = ["systemctl", "reboot"]
+confirm = true
+
+[actions.system.shutdown]
+label = "Shutdown"
+command = ["systemctl", "poweroff"]
+confirm = true
+
+[actions.session.logout]
+label = "Logout"
+command = ["hyprctl", "dispatch", "exit"]
+confirm = true
+```
+
+Quickshell should display confirmations. `board` should still enforce
+`confirm = true` unless the caller explicitly supplies a confirmation token or
+uses an interactive confirmation flow.
+
+## Command Modules
+
+Keep the `dboard` command-panel idea, but make argv arrays the default and
+bound every command by timeout and output size.
+
+```toml
+[modules.ss]
+kind = "command"
+command = ["ss", "-s"]
+interval = "5s"
+timeout = "2s"
+max_bytes = 4096
+shell = false
+```
+
+Shell strings are opt-in:
+
+```toml
+[modules.custom]
+kind = "command"
+command = "some shell pipeline"
+shell = true
+interval = "1m"
+```
+
+`shell = true` should be treated as a compatibility feature, not the common
+path.
+
+## Daemon API
+
+Use a Unix socket as the primary transport:
+
+```text
+${XDG_RUNTIME_DIR}/board.sock
+```
+
+Initial request shapes:
+
+```json
+{"type":"get","surface":"bar"}
+{"type":"get","layout":"dashboard"}
+{"type":"subscribe","surface":"bar"}
+{"type":"refresh","module":"gsync"}
+{"type":"hook","module":"gsync","health":"warning","text":"2 repos failed"}
+{"type":"action","id":"system.suspend"}
+```
+
+Keep the JSON cache only for cold start, debug, and fallback:
+
+```text
+${XDG_STATE_HOME}/board/cache.json
+```
+
+Quickshell and TUI should request snapshots or subscribe to daemon events; they
+should not poll cache files every second.
+
+## Hook Policy
+
+Hooks are first-class and should update state immediately. They are ideal for
+irregular state:
+
+- sync finished
+- scripts failed
+- repo status changed
+- notification-like events
+- battery or power events, when a system event source is available
+
+Polling remains useful as reconciliation:
+
+- fast native metrics use scheduled intervals
+- expensive checks run every 10 minutes or longer
+- hook-driven checks reconcile slowly to repair missed events
+
+## Module System Tasks
+
+These tasks make native checks removable, testable, and extensible in the same
+spirit as `wtfutil` modules or editor plugins, without building speculative
+dynamic loading first.
+
+1. Move native check implementations out of `board/src/main.rs` into
+   `board/src/modules/`.
+   - Acceptance: `cpu`, `mem`, `temp`, `docker`, `time`, `safe`, `resolv`,
+     `weather`, `time-panel`, and `todo-panel` live in focused module files.
+   - Validation: `cargo test -p board`.
+
+2. Add a small module registry.
+   - Acceptance: config `kind` strings resolve through one registry instead of
+     a `match` spread across the CLI path.
+   - Validation: `board checks` still lists the same kinds and
+     `board check cpu` still works.
+
+3. Define a shared module trait or equivalent minimal interface.
+   - Acceptance: each module exposes its `kind` and a `run` entrypoint that
+     receives `CheckConfig` plus optional previous state.
+   - Validation: CPU still uses previous samples for percent calculation.
+
+4. Keep command checks as one module.
+   - Acceptance: `kind = "command"` is implemented by `modules::command`, with
+     argv-array execution, timeout, and output handling unchanged.
+   - Validation: `board check alerts` and `board check scripts` run through the
+     command module.
+
+5. Add focused tests next to module behavior.
+   - Acceptance: parser/format logic for CPU, mem, docker, time, and command
+     health mapping has tests near the module code.
+   - Validation: `cargo test -p board`.
+
+6. Add feature gates only when a module has real optional weight.
+   - Acceptance: core desktop modules stay default; heavier future families
+     such as `kamailio`, `nvim`, or `tmux` can become features when they exist.
+   - Validation: default `cargo test --workspace` still works without extra
+     services.
+
+7. Document the module author path.
+   - Acceptance: docs explain "add file, register kind, add tests, add example
+     config".
+   - Validation: docs include one minimal module checklist.
+
+8. Add module descriptors and inspection.
+   - Acceptance: every module reports id, kind, feature gate if any, docs path,
+     config keys, output fields, requirements, default interval, and readiness.
+   - Validation: `board inspect modules --format json` explains compiled,
+     enabled, loaded, initialized, running, and unavailable states.
+
+9. Add explicit config load policy.
+   - Acceptance: `[modules].load = [...]` selects concrete module ids, unknown
+     ids fail fast, and omitted load config uses the documented desktop
+     default set.
+   - Validation: config checks produce specific hints for `not_compiled`,
+     `dependency_missing`, `policy_denied`, `conflict`, and
+     `api_incompatible`.
+
+10. Keep external tools as requirements.
+   - Acceptance: command-backed or tool-backed modules declare their required
+     binaries, paths, sockets, env vars, or services without modeling them as
+     module dependencies.
+   - Validation: `board doctor` reports missing requirements without starting
+     long-running checks.
+
+11. Defer dynamic external plugin loading.
+   - Acceptance: no ABI, WASM, Lua, dylib, or subprocess plugin protocol is
+     added until there is a real out-of-tree module to support.
+   - Validation: design doc states this explicitly.
+
+## Migration Plan
+
+1. Stabilize shared `rush-core` types for module state, health, render hints,
+   actions, and layouts.
+2. Add config parsing for modules, actions, surfaces, and layouts.
+3. Move existing `board` checks into native module implementations.
+4. Add a command module runner with timeout, output limits, and `shell = false`
+   by default.
+5. Add `boardd` with independent async intervals.
+6. Add the Unix socket `get` API.
+7. Rebuild `board once` and `board render` on the same core.
+8. Add `subscribe` for event-driven frontends.
+9. Switch the Quickshell bar to `boardd`.
+10. Add `board tui`.
+11. Add a Quickshell dashboard popup that renders shared layout widgets.
+12. Add the shared action system and a Quickshell power/session popup.
+13. Replace remaining rofi-style popups through Quickshell backed by shared
+    actions or modules.
+14. Keep old scripts as wrappers until parity is verified.
+
+## Avoid
+
+- Quickshell implementing check logic.
+- TUI running independent checks.
+- Scripts writing files as the main state path.
+- A single global refresh interval.
+- Shell strings by default.
+- Layout tied only to terminal coordinates.
+- Duplicating config between Quickshell and Rust.
+- Treating every widget as a separate process.

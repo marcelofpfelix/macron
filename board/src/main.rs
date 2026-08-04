@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use chrono_tz::Tz;
 use clap::{Parser, Subcommand, ValueEnum};
 use rush_core::{Health, StatusItem, SurfaceFormat, render_status_line, render_tui_panel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -45,11 +46,25 @@ enum Commands {
         /// Ignore cached state and run selected checks before rendering.
         #[arg(long)]
         fresh: bool,
+        /// Keep rendering the surface as a newline-delimited stream.
+        #[arg(long)]
+        watch: bool,
         format: RenderFormat,
         surface: Option<String>,
     },
     /// Run one check and print JSON.
     Check { name: String },
+    /// Run an explicit configured action.
+    Action {
+        /// Action id, for example personal.refresh.
+        name: String,
+        /// Print the resolved command without running it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm actions marked confirm=true.
+        #[arg(long)]
+        yes: bool,
+    },
     /// List configured checks.
     Checks,
     /// Print Prometheus textfile-compatible metrics from fresh check results.
@@ -84,11 +99,15 @@ struct Config {
     check: Vec<CheckConfig>,
     #[serde(default)]
     surface: Vec<SurfaceConfig>,
+    #[serde(default)]
+    actions: BTreeMap<String, BTreeMap<String, ActionConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CheckConfig {
     name: String,
+    #[serde(default)]
+    label: Option<String>,
     kind: CheckKind,
     #[serde(default = "default_enabled")]
     enabled: bool,
@@ -99,6 +118,20 @@ struct CheckConfig {
     #[serde(default)]
     fresh_for: Option<HumanDuration>,
     command: Option<Vec<String>>,
+    #[serde(default)]
+    warning: Option<u64>,
+    #[serde(default)]
+    critical: Option<u64>,
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    timezones: Vec<TimezoneConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimezoneConfig {
+    label: String,
+    zone: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +154,17 @@ enum CheckKind {
 struct SurfaceConfig {
     name: String,
     checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActionConfig {
+    #[serde(default)]
+    label: Option<String>,
+    command: Vec<String>,
+    #[serde(default)]
+    confirm: bool,
+    #[serde(default = "default_timeout")]
+    timeout: HumanDuration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,19 +222,18 @@ async fn main() -> Result<()> {
         Commands::Run => run_loop(&config, &cache_dir).await?,
         Commands::Render {
             fresh,
+            watch,
             format,
             surface,
         } => {
-            let items = if fresh {
-                render_surface_fresh(&config, surface.as_deref()).await?
+            if watch {
+                render_watch(&config, &cache_dir, fresh, format, surface.as_deref()).await?;
             } else {
-                render_surface_cache_first(&config, &cache_dir, surface.as_deref()).await?
-            };
-            let output = match format {
-                RenderFormat::Text => render_text_items(&items),
-                _ => render_status_line(&items, format.into()),
-            };
-            println!("{output}");
+                println!(
+                    "{}",
+                    render_output(&config, &cache_dir, fresh, format, surface.as_deref()).await?
+                );
+            }
         }
         Commands::Check { name } => {
             let check = config
@@ -205,12 +248,15 @@ async fn main() -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        Commands::Action { name, dry_run, yes } => run_action(&config, &name, dry_run, yes).await?,
         Commands::Checks => {
             for check in &config.check {
                 let state = if check.enabled { "enabled" } else { "disabled" };
+                let label = check.label.as_deref().unwrap_or(&check.name);
                 println!(
-                    "{} {:?} {} every {}",
+                    "{} {:<12} {:?} {} every {}",
                     check.name,
+                    label,
                     check.kind,
                     state,
                     String::from(check.interval)
@@ -232,13 +278,57 @@ async fn main() -> Result<()> {
             let items = render_surface_cache_first(&config, &cache_dir, surface.as_deref()).await?;
             let rows = items
                 .iter()
-                .map(|item| format!("{:<10} {:<8} {}", item.name, item.health, item.text))
+                .map(|item| {
+                    format!(
+                        "{:<10} {:<8} {}",
+                        check_display_label(&config, &item.name),
+                        item.health,
+                        item.text
+                    )
+                })
                 .collect::<Vec<_>>();
             println!("{}", render_tui_panel("board", &rows, 100, 24));
         }
     }
 
     Ok(())
+}
+
+async fn render_output(
+    config: &Config,
+    cache_dir: &Path,
+    fresh: bool,
+    format: RenderFormat,
+    surface: Option<&str>,
+) -> Result<String> {
+    let items = if fresh {
+        render_surface_fresh(config, surface).await?
+    } else {
+        render_surface_cache_first(config, cache_dir, surface).await?
+    };
+    Ok(match format {
+        RenderFormat::Text => render_text_items(&items),
+        _ => render_status_line(&items, format.into()),
+    })
+}
+
+async fn render_watch(
+    config: &Config,
+    cache_dir: &Path,
+    fresh: bool,
+    format: RenderFormat,
+    surface: Option<&str>,
+) -> Result<()> {
+    let mut timer = interval(Duration::from_secs(1));
+    timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        timer.tick().await;
+        println!(
+            "{}",
+            render_output(config, cache_dir, fresh, format, surface).await?
+        );
+        std::io::stdout().flush()?;
+    }
 }
 
 async fn run_loop(config: &Config, cache_dir: &Path) -> Result<()> {
@@ -282,6 +372,9 @@ async fn render_surface_cache_first(
             {
                 result
             }
+            cached if !render_can_run_check(check) => {
+                cached.unwrap_or_else(|| missing_cached_check(check))
+            }
             cached => {
                 let result = run_check_with_previous(check, cached.as_ref()).await;
                 write_cache_one(cache_dir, &result)?;
@@ -291,6 +384,22 @@ async fn render_surface_cache_first(
         items.push(result.item);
     }
     Ok(items)
+}
+
+fn render_can_run_check(check: &CheckConfig) -> bool {
+    check.kind != CheckKind::Command
+}
+
+fn missing_cached_check(check: &CheckConfig) -> CheckResult {
+    CheckResult {
+        item: StatusItem::new(
+            &check.name,
+            Health::Unknown,
+            format!("{} pending", check.name),
+        ),
+        timestamp: now(),
+        cpu_sample: None,
+    }
 }
 
 async fn render_surface_fresh(
@@ -303,6 +412,52 @@ async fn render_surface_fresh(
         items.push(run_check(check).await.item);
     }
     Ok(items)
+}
+
+fn check_display_label<'a>(config: &'a Config, name: &'a str) -> &'a str {
+    config
+        .check
+        .iter()
+        .find(|check| check.name == name)
+        .and_then(|check| check.label.as_deref())
+        .unwrap_or(name)
+}
+
+fn find_action<'a>(config: &'a Config, name: &str) -> Result<&'a ActionConfig> {
+    let (group, action) = name
+        .split_once('.')
+        .with_context(|| format!("action name must be group.name: {name}"))?;
+    config
+        .actions
+        .get(group)
+        .and_then(|group| group.get(action))
+        .with_context(|| format!("unknown action: {name}"))
+}
+
+async fn run_action(config: &Config, name: &str, dry_run: bool, yes: bool) -> Result<()> {
+    let action = find_action(config, name)?;
+    if action.confirm && !yes && !dry_run {
+        bail!("action {name} requires --yes");
+    }
+    let Some((program, args)) = action.command.split_first() else {
+        bail!("action {name} has empty command");
+    };
+    if dry_run {
+        println!("{}", action.command.join(" "));
+        return Ok(());
+    }
+
+    let mut child = Command::new(program);
+    child.args(args);
+    let status = match timeout(action.timeout.as_duration(), child.status()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(err)) => bail!("action {name} failed to start: {err}"),
+        Err(_) => bail!("action {name} timeout"),
+    };
+    if !status.success() {
+        bail!("action {name} exited with {}", status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 fn render_text_items(items: &[StatusItem]) -> String {
@@ -354,13 +509,11 @@ async fn run_check_with_previous(
     previous: Option<&CheckResult>,
 ) -> CheckResult {
     match check.kind {
-        CheckKind::NativeCpu => {
-            native_cpu(&check.name, previous.and_then(|result| result.cpu_sample))
-        }
-        CheckKind::NativeMem => check_result(native_mem(&check.name)),
-        CheckKind::NativeTemp => check_result(native_temp(&check.name)),
-        CheckKind::NativeWeather => check_result(native_weather(&check.name).await),
-        CheckKind::NativeTimePanel => check_result(native_time_panel(&check.name)),
+        CheckKind::NativeCpu => native_cpu(check, previous.and_then(|result| result.cpu_sample)),
+        CheckKind::NativeMem => check_result(native_mem(check)),
+        CheckKind::NativeTemp => check_result(native_temp(check)),
+        CheckKind::NativeWeather => check_result(native_weather(check).await),
+        CheckKind::NativeTimePanel => check_result(native_time_panel(check)),
         CheckKind::NativeTodoPanel => check_result(native_todo_panel(&check.name).await),
         CheckKind::NativeSafe => check_result(native_safe(&check.name)),
         CheckKind::NativeResolv => check_result(native_resolv(&check.name)),
@@ -378,14 +531,15 @@ fn check_result(item: StatusItem) -> CheckResult {
     }
 }
 
-fn native_cpu(name: &str, previous: Option<CpuSample>) -> CheckResult {
+fn native_cpu(check: &CheckConfig, previous: Option<CpuSample>) -> CheckResult {
+    let name = &check.name;
     match read_cpu_sample() {
         Some(sample) => {
             let busy_pct = cpu_busy_percent(sample, previous).unwrap_or(0);
             CheckResult {
                 item: StatusItem::new(
                     name,
-                    health_percent(busy_pct, 60, 85),
+                    health_percent_for(check, busy_pct, 60, 85),
                     format!(" {busy_pct:2}"),
                 ),
                 timestamp: now(),
@@ -429,7 +583,8 @@ fn cpu_busy_percent(current: CpuSample, previous: Option<CpuSample>) -> Option<u
     active.checked_mul(100)?.checked_div(total)
 }
 
-fn native_mem(name: &str) -> StatusItem {
+fn native_mem(check: &CheckConfig) -> StatusItem {
+    let name = &check.name;
     match fs::read_to_string("/proc/meminfo") {
         Ok(text) => {
             let mut total = 0u64;
@@ -447,7 +602,7 @@ fn native_mem(name: &str) -> StatusItem {
             let used_pct = 100 - (available * 100 / total);
             StatusItem::new(
                 name,
-                health_percent(used_pct, 60, 85),
+                health_percent_for(check, used_pct, 60, 85),
                 format!(" {used_pct:2}"),
             )
         }
@@ -455,7 +610,8 @@ fn native_mem(name: &str) -> StatusItem {
     }
 }
 
-fn native_temp(name: &str) -> StatusItem {
+fn native_temp(check: &CheckConfig) -> StatusItem {
+    let name = &check.name;
     let zones = match fs::read_dir("/sys/class/thermal") {
         Ok(zones) => zones,
         Err(_) => return StatusItem::new(name, Health::Unknown, "󰔐  0"),
@@ -475,23 +631,26 @@ fn native_temp(name: &str) -> StatusItem {
     match max_c {
         Some(temp) => StatusItem::new(
             name,
-            health_percent(temp as u64, 60, 80),
+            health_percent_for(check, temp as u64, 60, 80),
             format!("󰔐 {temp:2}"),
         ),
         None => StatusItem::new(name, Health::Unknown, "󰔐  0"),
     }
 }
 
-async fn native_weather(name: &str) -> StatusItem {
-    let name = name.to_string();
+async fn native_weather(check: &CheckConfig) -> StatusItem {
+    let name = check.name.clone();
     let fallback_name = name.clone();
-    task::spawn_blocking(move || native_weather_blocking(&name))
+    let location = check
+        .location
+        .clone()
+        .unwrap_or_else(|| "Lisbon".to_string());
+    task::spawn_blocking(move || native_weather_blocking(&name, &location))
         .await
         .unwrap_or_else(|_| StatusItem::new(fallback_name, Health::Unknown, "󰖐 --"))
 }
 
-fn native_weather_blocking(name: &str) -> StatusItem {
-    let location = std::env::var("WEATHER_LOCATION").unwrap_or_else(|_| "Lisbon".to_string());
+fn native_weather_blocking(name: &str, location: &str) -> StatusItem {
     let url = format!(
         "https://wttr.in/{}?format=%C+%t",
         encode_wttr_location(&location)
@@ -516,16 +675,16 @@ fn native_weather_blocking(name: &str) -> StatusItem {
     StatusItem::new(name, Health::Ok, format!("{icon} {temp}"))
 }
 
-fn native_time_panel(name: &str) -> StatusItem {
+fn native_time_panel(check: &CheckConfig) -> StatusItem {
+    let name = &check.name;
     let now = Local::now();
     let mut lines = vec!["Timezones".to_string()];
-    for (label, zone) in [
-        ("Lisbon", "Europe/Lisbon"),
-        ("UTC", "UTC"),
-        ("New York", "America/New_York"),
-        ("SF", "America/Los_Angeles"),
-    ] {
-        lines.push(format_timezone_line(label, zone, now.timestamp()));
+    for timezone in timezones_for(check) {
+        lines.push(format_timezone_line(
+            &timezone.label,
+            &timezone.zone,
+            now.timestamp(),
+        ));
     }
     lines.push(String::new());
     lines.push("Timestamps".to_string());
@@ -539,6 +698,22 @@ fn native_time_panel(name: &str) -> StatusItem {
             .map(|line| format!("  {line}")),
     );
     StatusItem::new(name, Health::Ok, lines.join("\n"))
+}
+
+fn timezones_for(check: &CheckConfig) -> Vec<TimezoneConfig> {
+    if !check.timezones.is_empty() {
+        return check.timezones.clone();
+    }
+    vec![
+        TimezoneConfig {
+            label: "Lisbon".to_string(),
+            zone: "Europe/Lisbon".to_string(),
+        },
+        TimezoneConfig {
+            label: "UTC".to_string(),
+            zone: "UTC".to_string(),
+        },
+    ]
 }
 
 fn format_timezone_line(label: &str, zone: &str, timestamp: i64) -> String {
@@ -851,110 +1026,10 @@ fn load_config(path: Option<&Path>) -> Result<Config> {
     toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 
+const DEFAULT_CONFIG_TOML: &str = include_str!("../default.toml");
+
 fn default_config() -> Config {
-    Config {
-        check: vec![
-            native_check("cpu", CheckKind::NativeCpu, "5s"),
-            native_check("mem", CheckKind::NativeMem, "10s"),
-            native_check("temp", CheckKind::NativeTemp, "30s"),
-            disabled_native_check("weather", CheckKind::NativeWeather, "15m"),
-            native_check("time-panel", CheckKind::NativeTimePanel, "1s"),
-            native_check("todo-panel", CheckKind::NativeTodoPanel, "60s"),
-            quickshell_command_check("scripts", "check-scripts", "10s"),
-            quickshell_command_check("alerts", "alerts", "10s"),
-            native_check("time", CheckKind::NativeTimeOffset, "10s"),
-            native_check("resolv", CheckKind::NativeResolv, "15s"),
-            native_check("safe", CheckKind::NativeSafe, "30s"),
-            command_check("gpg", "check-gpg", "30s"),
-            native_check("docker", CheckKind::NativeDocker, "30s"),
-            command_check("agents", "check-agents", "10s"),
-        ],
-        surface: vec![
-            SurfaceConfig {
-                name: "tmux-top".to_string(),
-                checks: vec!["agents", "gpg", "docker", "cpu", "mem"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            },
-            SurfaceConfig {
-                name: "quickshell-bar".to_string(),
-                checks: vec![
-                    "scripts", "alerts", "time", "resolv", "safe", "gpg", "docker", "agents",
-                    "cpu", "mem", "temp", "weather",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            },
-            SurfaceConfig {
-                name: "quickshell-weather".to_string(),
-                checks: vec!["weather"].into_iter().map(str::to_string).collect(),
-            },
-            SurfaceConfig {
-                name: "quickshell-time-panel".to_string(),
-                checks: vec!["time-panel"].into_iter().map(str::to_string).collect(),
-            },
-            SurfaceConfig {
-                name: "quickshell-todo-panel".to_string(),
-                checks: vec!["todo-panel"].into_iter().map(str::to_string).collect(),
-            },
-            SurfaceConfig {
-                name: "quickshell-panels".to_string(),
-                checks: vec!["time-panel", "todo-panel"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            },
-        ],
-    }
-}
-
-fn native_check(name: &str, kind: CheckKind, interval: &str) -> CheckConfig {
-    CheckConfig {
-        name: name.to_string(),
-        kind,
-        interval: HumanDuration(parse_duration(interval).expect("valid default interval")),
-        timeout: default_timeout(),
-        fresh_for: None,
-        command: None,
-        enabled: true,
-    }
-}
-
-fn disabled_native_check(name: &str, kind: CheckKind, interval: &str) -> CheckConfig {
-    CheckConfig {
-        enabled: false,
-        ..native_check(name, kind, interval)
-    }
-}
-
-fn command_check(name: &str, command: &str, interval: &str) -> CheckConfig {
-    CheckConfig {
-        name: name.to_string(),
-        kind: CheckKind::Command,
-        interval: HumanDuration(parse_duration(interval).expect("valid default interval")),
-        timeout: HumanDuration(Duration::from_secs(2)),
-        fresh_for: None,
-        command: Some(vec![command.to_string()]),
-        enabled: true,
-    }
-}
-
-fn quickshell_command_check(name: &str, command: &str, interval: &str) -> CheckConfig {
-    CheckConfig {
-        name: name.to_string(),
-        kind: CheckKind::Command,
-        interval: HumanDuration(parse_duration(interval).expect("valid default interval")),
-        timeout: HumanDuration(Duration::from_secs(2)),
-        fresh_for: None,
-        command: Some(vec![
-            "env".to_string(),
-            "BAR_COLOR_FORMAT=quickshell".to_string(),
-            command.to_string(),
-        ]),
-        enabled: true,
-    }
+    toml::from_str(DEFAULT_CONFIG_TOML).expect("built-in board default config parses")
 }
 
 fn default_enabled() -> bool {
@@ -1013,6 +1088,19 @@ fn print_metrics(results: &[CheckResult]) {
     }
 }
 
+fn health_percent_for(
+    check: &CheckConfig,
+    value: u64,
+    default_warning: u64,
+    default_critical: u64,
+) -> Health {
+    health_percent(
+        value,
+        check.warning.unwrap_or(default_warning),
+        check.critical.unwrap_or(default_critical),
+    )
+}
+
 fn health_percent(value: u64, warning: u64, critical: u64) -> Health {
     if value >= critical {
         Health::Critical
@@ -1069,6 +1157,23 @@ fn now() -> u64 {
 mod tests {
     use super::*;
 
+    fn check_config(name: &str, kind: CheckKind) -> CheckConfig {
+        CheckConfig {
+            name: name.to_string(),
+            label: None,
+            kind,
+            interval: HumanDuration(Duration::from_secs(5)),
+            timeout: HumanDuration(Duration::from_secs(1)),
+            fresh_for: None,
+            command: None,
+            warning: None,
+            critical: None,
+            location: None,
+            timezones: Vec::new(),
+            enabled: true,
+        }
+    }
+
     #[test]
     fn parses_duration_units() {
         assert_eq!(parse_duration("250ms"), Some(Duration::from_millis(250)));
@@ -1111,6 +1216,13 @@ mod tests {
             meminfo_value("MemAvailable:   42 kB", "MemAvailable:"),
             Some(42)
         );
+    }
+
+    #[test]
+    fn render_skips_command_checks() {
+        let check = check_config("scripts", CheckKind::Command);
+        assert!(!render_can_run_check(&check));
+        assert_eq!(missing_cached_check(&check).item.text, "scripts pending");
     }
 
     #[test]
@@ -1165,6 +1277,41 @@ mod tests {
     }
 
     #[test]
+    fn check_display_label_uses_config_label_without_changing_name() {
+        let mut config = default_config();
+        let check = config
+            .check
+            .iter_mut()
+            .find(|check| check.name == "cpu")
+            .unwrap();
+        check.label = Some("Processor".to_string());
+
+        assert_eq!(check_display_label(&config, "cpu"), "Processor");
+        assert_eq!(check_display_label(&config, "missing"), "missing");
+    }
+
+    #[test]
+    fn parses_nested_action_config() {
+        let config: Config = toml::from_str(
+            r#"
+            [actions.personal.refresh]
+            label = "Refresh"
+            command = ["board", "once"]
+            confirm = false
+            timeout = "5s"
+            "#,
+        )
+        .unwrap();
+        let action = find_action(&config, "personal.refresh").unwrap();
+        assert_eq!(
+            action.command,
+            vec!["board".to_string(), "once".to_string()]
+        );
+        assert!(!action.confirm);
+        assert_eq!(action.timeout.as_duration(), Duration::from_secs(5));
+    }
+
+    #[test]
     fn text_renderer_omits_health_and_empty_items() {
         let items = vec![
             StatusItem::new("empty", Health::Ok, ""),
@@ -1175,7 +1322,7 @@ mod tests {
 
     #[test]
     fn renders_native_time_panel_without_shelling_out() {
-        let item = native_time_panel("time-panel");
+        let item = native_time_panel(&check_config("time-panel", CheckKind::NativeTimePanel));
         assert_eq!(item.health, Health::Ok);
         assert!(item.text.contains("Timezones"));
         assert!(item.text.contains("Timestamps"));
@@ -1206,11 +1353,16 @@ mod tests {
     fn stale_cache_expires_after_fresh_window() {
         let check = CheckConfig {
             name: "cpu".to_string(),
+            label: None,
             kind: CheckKind::NativeCpu,
             interval: HumanDuration(Duration::from_secs(5)),
             timeout: HumanDuration(Duration::from_secs(1)),
             fresh_for: Some(HumanDuration(Duration::from_secs(10))),
             command: None,
+            warning: None,
+            critical: None,
+            location: None,
+            timezones: Vec::new(),
             enabled: true,
         };
         let fresh = CheckResult {

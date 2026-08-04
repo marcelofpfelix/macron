@@ -1,0 +1,149 @@
+[[check]]
+name = "cpu"
+label = "CPU"
+kind = "native-cpu"
+warning = 60
+critical = 85
+interval = "5s"
+fresh_for = "15s"
+
+[[check]]
+name = "mem"
+label = "Memory"
+kind = "native-mem"
+warning = 60
+critical = 85
+interval = "10s"
+fresh_for = "30s"
+
+[[check]]
+name = "temp"
+label = "Temp"
+kind = "native-temp"
+warning = 60
+critical = 80
+interval = "30s"
+fresh_for = "90s"
+
+[[check]]
+name = "weather"
+label = "Weather"
+kind = "native-weather"
+location = "Lisbon"
+enabled = false
+interval = "15m"
+timeout = "3s"
+fresh_for = "30m"
+
+[[check]]
+name = "time-panel"
+label = "Time"
+kind = "native-time-panel"
+timezones = [
+  { label = "Lisbon", zone = "Europe/Lisbon" },
+  { label = "UTC", zone = "UTC" },
+  { label = "New York", zone = "America/New_York" },
+  { label = "SF", zone = "America/Los_Angeles" },
+]
+interval = "1s"
+fresh_for = "3s"
+
+[[check]]
+name = "todo-panel"
+label = "Todo"
+kind = "native-todo-panel"
+interval = "60s"
+timeout = "2s"
+fresh_for = "3m"
+
+[[check]]
+name = "scripts"
+label = "Scripts"
+kind = "command"
+command = ["env", "BAR_COLOR_FORMAT=quickshell", "check-scripts"]
+interval = "10s"
+timeout = "2s"
+fresh_for = "30s"
+
+[[check]]
+name = "alerts"
+label = "Alerts"
+kind = "command"
+command = ["env", "BAR_COLOR_FORMAT=quickshell", "alerts"]
+interval = "10s"
+timeout = "2s"
+fresh_for = "30s"
+
+[[check]]
+name = "time"
+label = "Clock"
+kind = "native-time-offset"
+interval = "10s"
+timeout = "2s"
+fresh_for = "30s"
+
+[[check]]
+name = "resolv"
+label = "DNS"
+kind = "native-resolv"
+interval = "15s"
+timeout = "2s"
+fresh_for = "45s"
+
+[[check]]
+name = "safe"
+label = "Safe"
+kind = "native-safe"
+interval = "30s"
+timeout = "2s"
+fresh_for = "90s"
+
+[[check]]
+name = "gpg"
+label = "GPG"
+kind = "command"
+command = ["check-gpg"]
+interval = "30s"
+timeout = "2s"
+fresh_for = "90s"
+
+[[check]]
+name = "docker"
+label = "Docker"
+kind = "native-docker"
+interval = "30s"
+timeout = "2s"
+fresh_for = "90s"
+
+[[check]]
+name = "agents"
+label = "Agents"
+kind = "command"
+command = ["check-agents"]
+interval = "10s"
+timeout = "2s"
+fresh_for = "30s"
+
+[[surface]]
+name = "tmux-top"
+checks = ["agents", "gpg", "docker", "cpu", "mem"]
+
+[[surface]]
+name = "quickshell-bar"
+checks = ["scripts", "alerts", "time", "resolv", "safe", "gpg", "docker", "agents", "cpu", "mem", "temp", "weather"]
+
+[[surface]]
+name = "quickshell-weather"
+checks = ["weather"]
+
+[[surface]]
+name = "quickshell-time-panel"
+checks = ["time-panel"]
+
+[[surface]]
+name = "quickshell-todo-panel"
+checks = ["todo-panel"]
+
+[[surface]]
+name = "quickshell-panels"
+checks = ["time-panel", "todo-panel"]
