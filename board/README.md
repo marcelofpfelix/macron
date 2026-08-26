@@ -24,6 +24,8 @@ board render --format json --surface quickshell-bar
 board render --format quickshell --surface quickshell-bar
 ```
 
+Unknown surface names fail instead of falling back to another surface. JSON output contains `schema_version`, `surface`, aggregate `health`, and `items`; `--watch --format json` emits one document per line.
+
 The old positional form remains temporarily available for compatibility.
 
 Checks are selected at runtime: use `kind = "native-*"` for in-process Rust

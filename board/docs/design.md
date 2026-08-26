@@ -544,6 +544,7 @@ dynamic loading first.
 
 1. Move native check implementations out of `board/src/main.rs` into
    `board/src/modules/`.
+   - Progress: implementations and the single kind-dispatch registry now live in `modules/mod.rs`; split files only when a module needs independent ownership or tests.
    - Acceptance: `cpu`, `mem`, `temp`, `docker`, `time`, `safe`, `resolv`,
      `weather`, `time-panel`, and `todo-panel` live in focused module files.
    - Validation: `cargo test -p board`.
