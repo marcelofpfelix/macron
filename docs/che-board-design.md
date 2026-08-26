@@ -157,8 +157,8 @@ Commands:
 ```sh
 board run
 board once
-board render quickshell
-board render tmux
+board render --format quickshell
+board render --format tmux
 board check <name>
 board checks
 board metrics
@@ -170,7 +170,7 @@ Runtime behavior:
 - `board run` is a long-lived async collector.
 - Each check has its own interval, timeout, freshness limit, and renderer.
 - Results are cached under `${XDG_RUNTIME_DIR:-/tmp}/board/`.
-- `board render quickshell` and `board render tmux` are one-shot readers of the
+- `board render --format quickshell` and `board render --format tmux` are one-shot readers of the
   cache, suitable for Quickshell `StatusText` and tmux `#(...)`.
 - `board once` runs all due checks once and writes the cache, useful for cron,
   debugging, and non-daemon startup.
@@ -252,7 +252,7 @@ tmux should not perform heavy scans every status refresh. It should read cached
 state:
 
 ```tmux
-set -ag status-right " #(board render tmux tmux-top)"
+set -ag status-right " #(board render --format tmux --surface tmux-top)"
 ```
 
 `agent-tmux` should remain the agent-aware tool until there is a clean native

@@ -59,6 +59,8 @@ pub struct StatusItem {
     pub name: String,
     pub health: Health,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl StatusItem {
@@ -67,13 +69,21 @@ impl StatusItem {
             name: name.into(),
             health,
             text: text.into(),
+            detail: None,
         }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceFormat {
     Plain,
+    Terminal,
+    TerminalPlain,
     Tmux,
     Quickshell,
 }
@@ -88,12 +98,19 @@ pub fn render_status_line(items: &[StatusItem], format: SurfaceFormat) -> String
 }
 
 pub fn render_status_item(item: &StatusItem, format: SurfaceFormat) -> String {
+    let text = strip_quickshell_markup(&item.text);
     match format {
-        SurfaceFormat::Plain => format!("{} {}", item.health.icon(), item.text),
+        SurfaceFormat::Plain => format!("{} {}", item.health.icon(), text),
+        SurfaceFormat::Terminal => match item.health {
+            Health::Ok | Health::Unknown => text,
+            Health::Warning => format!("\x1b[33m{text}\x1b[0m"),
+            Health::Critical => format!("\x1b[1;31m{text}\x1b[0m"),
+        },
+        SurfaceFormat::TerminalPlain => text,
         SurfaceFormat::Tmux => match item.health {
-            Health::Ok | Health::Unknown => item.text.clone(),
-            Health::Warning => format!("#[fg=yellow]{}#[default]", item.text),
-            Health::Critical => format!("#[fg=red]{}#[default]", item.text),
+            Health::Ok | Health::Unknown => text,
+            Health::Warning => format!("#[fg=yellow]{text}#[default]"),
+            Health::Critical => format!("#[fg=red]{text}#[default]"),
         },
         SurfaceFormat::Quickshell => {
             if item.text.contains("<span") {
@@ -112,6 +129,21 @@ pub fn render_status_item(item: &StatusItem, format: SurfaceFormat) -> String {
             }
         }
     }
+}
+
+pub fn strip_quickshell_markup(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("<span") {
+        output.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find('>') else {
+            output.push_str(&rest[start..]);
+            return output.replace("</span>", "");
+        };
+        rest = &rest[start + end + 1..];
+    }
+    output.push_str(rest);
+    output.replace("</span>", "")
 }
 
 pub fn normalize_key(input: &str) -> String {
@@ -228,6 +260,32 @@ mod tests {
         assert_eq!(
             render_status_item(&item, SurfaceFormat::Quickshell),
             "<span style=\"color:#f38ba8\">x</span>"
+        );
+    }
+
+    #[test]
+    fn renders_terminal_colors_without_quickshell_markup() {
+        let item = StatusItem::new(
+            "x",
+            Health::Critical,
+            "<span style=\"color:#fff\">failed</span>",
+        );
+        assert_eq!(
+            render_status_item(&item, SurfaceFormat::Terminal),
+            "\x1b[1;31mfailed\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn renders_terminal_text_without_colors() {
+        let item = StatusItem::new(
+            "x",
+            Health::Critical,
+            "<span style=\"color:#fff\">failed</span>",
+        );
+        assert_eq!(
+            render_status_item(&item, SurfaceFormat::TerminalPlain),
+            "failed"
         );
     }
 

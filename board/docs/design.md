@@ -208,14 +208,16 @@ boardd
         |
         +-- board once/status/action
         +-- board tui
-        +-- tmux status
+        +-- tmux and herdr status/dashboard views
         +-- Quickshell popups/bar/dashboard
+        +-- agent and future plugin integrations
 ```
 
 Only one process should collect state: `boardd`. Every UI consumes that state.
 Quickshell renders graphical bars and popups. A TUI renders the same model in a
-terminal. tmux reads compact status text. The CLI prints one-shot snapshots and
-executes explicit actions.
+terminal. tmux and herdr read compact status surfaces. Human CLI users can print
+one-shot snapshots or execute explicit actions. Agents and future plugins consume
+structured JSON or the daemon API; they must not parse presentation text.
 
 ## Module Model
 
@@ -416,7 +418,7 @@ The TUI should use the same daemon/config:
 
 tmux should remain compact:
 
-- read `board render tmux` or `board once bar`
+- read `board render --format tmux` or `board once bar`
 - avoid independent polling loops when `boardd` is running
 - degrade gracefully when the daemon is absent
 

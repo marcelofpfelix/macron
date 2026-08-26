@@ -15,7 +15,7 @@ compact visual surfaces and explicit buttons.
   actions.
 
 The bar should show only small status icons/counts. Details belong in a
-Quickshell dashboard popup, `board tui`, and `board render text`.
+Quickshell dashboard popup, `board tui`, and `board render --format text`.
 
 ## Source Policy
 
@@ -93,7 +93,7 @@ in QML state.
 1. Add `personal.today` and `personal.money` surfaces to board config examples.
    - Acceptance: surfaces reference only modules that have cacheable structured
      output.
-   - Validation: `board doctor` and `board render text personal.today`.
+   - Validation: `board doctor` and `board render --format text --surface personal.today`.
 
 2. Design the Pomodoro state machine before implementation.
    - Acceptance: documented states, transitions, action names, persistence file,
