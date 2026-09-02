@@ -15,6 +15,7 @@ but too small to justify one repository per command.
   and Neovim.
 - [`macron`](macron/): keeps a local crontab-format file and converts
   calendar-based macOS `launchd` plist jobs to and from that file.
+- [`mux`](mux/): declarative Herdr workspaces and server dashboards.
 - [`rush-core`](rush-core/): small shared models and render helpers used by
   multiple `rush` tools.
 
@@ -35,6 +36,17 @@ For local desktop integration, build release binaries and install them into
 make install
 ```
 
-The install target currently writes `amt`, `board`, `che`, and `macron` to `~/bin`. The dotfiles
-checkout already has a shell script named `che`; keep that collision in mind
-before switching PATH order or replacing the old cheatsheet wrapper.
+The install target writes `amt`, `board`, `che`, `macron`, and `mux` to
+`~/bin`. The dotfiles checkout already has a shell script named `che`; keep
+that collision in mind before switching PATH order or replacing the old
+cheatsheet wrapper.
+
+Build distributable macOS bundles for both Apple Silicon and Intel Macs with:
+
+```sh
+make release-macos
+```
+
+The output is written to `dist/aarch64-apple-darwin/` and
+`dist/x86_64-apple-darwin/`. These artifacts are reproducible and ignored by
+Git.
