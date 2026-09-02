@@ -1,0 +1,12 @@
+todo_dir = "~/sync/tasks"
+task_command = "task"
+
+[[files]]
+name = "personal"
+path = "personal-todo.md"
+export_txt = "personal-todo.txt"
+
+[[files]]
+name = "work"
+path = "work-todo.md"
+export_txt = "work-todo.txt"

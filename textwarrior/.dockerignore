@@ -1,0 +1,8 @@
+*
+!Dockerfile.e2e
+!Cargo.toml
+!src/
+!src/main.rs
+!tests/
+!tests/e2e/
+!tests/e2e/container-sync.sh

@@ -1,0 +1,14 @@
+FROM rust:1-alpine AS build
+
+WORKDIR /src
+COPY Cargo.toml ./
+COPY src ./src
+RUN cargo build --release --locked
+
+FROM alpine:3
+
+COPY --from=build /src/target/release/textwarrior /usr/local/bin/textwarrior
+COPY tests/e2e/container-sync.sh /usr/local/bin/textwarrior-container-e2e
+RUN chmod +x /usr/local/bin/textwarrior-container-e2e
+
+ENTRYPOINT ["/usr/local/bin/textwarrior-container-e2e"]

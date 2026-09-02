@@ -1,7 +1,7 @@
 CARGO := cargo
 BIN_DIR ?= $(HOME)/bin
 DIST_DIR ?= dist
-RUSH_BINS := amt board che macron mux
+RUSH_BINS := amt board che macron mux textwarrior
 
 .PHONY: all build release release-macos release-macos-arm64 release-macos-amd64 release-target install install-user fmt fmt-check lint test check clean help
 

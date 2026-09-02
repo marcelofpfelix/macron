@@ -1,5 +1,5 @@
 [workspace]
-members = ["amt", "board", "che", "macron", "mux", "rush-core"]
+members = ["amt", "board", "che", "macron", "mux", "rush-core", "textwarrior"]
 resolver = "3"
 
 [workspace.dependencies]
