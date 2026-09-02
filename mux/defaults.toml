@@ -1,0 +1,162 @@
+# Built-in dashboard layouts. ~/.config/mux/layouts.toml is merged on top,
+# so it only needs to contain the values a user wants to override.
+
+[layouts.dash2]
+workspace = "dash"
+tab = "{target}"
+servers = 1
+restart = "always"
+retry_seconds = 5
+
+[layouts.dash2.environment]
+LC_LAYOUT = "dash"
+LC_SERVICE = "{service}"
+
+[[layouts.dash2.panes]]
+id = "top-1"
+environment = { LC_PANE_ROW = "1" }
+label = "{target} top 1"
+command = "ssh -- {server_1}"
+
+[[layouts.dash2.panes]]
+id = "bottom-1"
+label = "{target} bottom 1"
+from = "top-1"
+split = "down"
+ratio = 0.5
+command = "ssh -- {server_1}"
+
+[layouts.dash8]
+workspace = "dash"
+tab = "{target}"
+servers = 4
+restart = "always"
+retry_seconds = 5
+
+[layouts.dash8.environment]
+LC_LAYOUT = "dash"
+LC_SERVICE = "{service}"
+
+[[layouts.dash8.panes]]
+id = "top-1"
+environment = { LC_PANE_ROW = "1" }
+label = "{target} top 1"
+command = "ssh -- {server_1}"
+
+[[layouts.dash8.panes]]
+id = "bottom-1"
+label = "{target} bottom 1"
+from = "top-1"
+split = "down"
+ratio = 0.5
+command = "ssh -- {server_1}"
+
+[[layouts.dash8.panes]]
+id = "top-2"
+environment = { LC_PANE_ROW = "1" }
+label = "{target} top 2"
+from = "top-1"
+split = "right"
+ratio = 0.25
+command = "ssh -- {server_2}"
+
+[[layouts.dash8.panes]]
+id = "bottom-2"
+label = "{target} bottom 2"
+from = "bottom-1"
+split = "right"
+ratio = 0.25
+command = "ssh -- {server_2}"
+
+[[layouts.dash8.panes]]
+id = "top-3"
+environment = { LC_PANE_ROW = "1" }
+label = "{target} top 3"
+from = "top-2"
+split = "right"
+ratio = 0.333333
+command = "ssh -- {server_3}"
+
+[[layouts.dash8.panes]]
+id = "bottom-3"
+label = "{target} bottom 3"
+from = "bottom-2"
+split = "right"
+ratio = 0.333333
+command = "ssh -- {server_3}"
+
+[[layouts.dash8.panes]]
+id = "top-4"
+environment = { LC_PANE_ROW = "1" }
+label = "{target} top 4"
+from = "top-3"
+split = "right"
+ratio = 0.5
+command = "ssh -- {server_4}"
+
+[[layouts.dash8.panes]]
+id = "bottom-4"
+label = "{target} bottom 4"
+from = "bottom-3"
+split = "right"
+ratio = 0.5
+command = "ssh -- {server_4}"
+
+[layouts.dash6]
+workspace = "dash"
+tab = "{target}"
+servers = 3
+restart = "always"
+retry_seconds = 5
+
+[layouts.dash6.environment]
+LC_LAYOUT = "dash"
+LC_SERVICE = "{service}"
+
+[[layouts.dash6.panes]]
+id = "top-1"
+environment = { LC_PANE_ROW = "1" }
+label = "{target} top 1"
+command = "ssh -- {server_1}"
+
+[[layouts.dash6.panes]]
+id = "bottom-1"
+label = "{target} bottom 1"
+from = "top-1"
+split = "down"
+ratio = 0.5
+command = "ssh -- {server_1}"
+
+[[layouts.dash6.panes]]
+id = "top-2"
+environment = { LC_PANE_ROW = "1" }
+label = "{target} top 2"
+from = "top-1"
+split = "right"
+ratio = 0.333333
+command = "ssh -- {server_2}"
+
+[[layouts.dash6.panes]]
+id = "bottom-2"
+label = "{target} bottom 2"
+from = "bottom-1"
+split = "right"
+ratio = 0.333333
+command = "ssh -- {server_2}"
+
+[[layouts.dash6.panes]]
+id = "top-3"
+environment = { LC_PANE_ROW = "1" }
+label = "{target} top 3"
+from = "top-2"
+split = "right"
+ratio = 0.5
+command = "ssh -- {server_3}"
+
+[[layouts.dash6.panes]]
+id = "bottom-3"
+label = "{target} bottom 3"
+from = "bottom-2"
+split = "right"
+ratio = 0.5
+command = "ssh -- {server_3}"

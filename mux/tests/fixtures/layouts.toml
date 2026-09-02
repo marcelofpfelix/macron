@@ -1,0 +1,57 @@
+[layouts.dash8]
+workspace = "dash"
+tab = "{target}"
+servers = 4
+
+[[layouts.dash8.panes]]
+id = "top-1"
+command = "ssh -- {server_1}; exec $SHELL -l"
+
+[[layouts.dash8.panes]]
+id = "bottom-1"
+from = "top-1"
+split = "down"
+ratio = 0.5
+command = "ssh -- {server_1}; exec $SHELL -l"
+
+[[layouts.dash8.panes]]
+id = "top-2"
+from = "top-1"
+split = "right"
+ratio = 0.25
+command = "ssh -- {server_2}; exec $SHELL -l"
+
+[[layouts.dash8.panes]]
+id = "bottom-2"
+from = "bottom-1"
+split = "right"
+ratio = 0.25
+command = "ssh -- {server_2}; exec $SHELL -l"
+
+[[layouts.dash8.panes]]
+id = "top-3"
+from = "top-2"
+split = "right"
+ratio = 0.333333
+command = "ssh -- {server_3}; exec $SHELL -l"
+
+[[layouts.dash8.panes]]
+id = "bottom-3"
+from = "bottom-2"
+split = "right"
+ratio = 0.333333
+command = "ssh -- {server_3}; exec $SHELL -l"
+
+[[layouts.dash8.panes]]
+id = "top-4"
+from = "top-3"
+split = "right"
+ratio = 0.5
+command = "ssh -- {server_4}; exec $SHELL -l"
+
+[[layouts.dash8.panes]]
+id = "bottom-4"
+from = "bottom-3"
+split = "right"
+ratio = 0.5
+command = "ssh -- {server_4}; exec $SHELL -l"
